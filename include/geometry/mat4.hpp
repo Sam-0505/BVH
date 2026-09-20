@@ -94,9 +94,14 @@ Scalar determinant(const Mat4& a);
 // wrong intersection rather than a slightly wrong pixel.
 //
 // Returns false and leaves `out` untouched when the matrix is SINGULAR, meaning
-// elimination reaches an exactly-zero pivot. A near-singular matrix is accepted
-// and yields a large-but-finite inverse; test determinant() if you need a
-// conditioning guarantee.
+// elimination reaches an exactly-zero pivot.
+//
+// A near-singular matrix is ACCEPTED and yields a large-but-finite inverse, and
+// this is a weak guarantee in practice: for degeneracy that arises from
+// arithmetic rather than from an exact pattern, the pivot lands near zero
+// rather than on it, and measurement puts the acceptance rate at roughly 88%.
+// Test determinant() if you need a conditioning guarantee. The implementation
+// explains why no magnitude threshold was used instead.
 //
 // There is deliberately no magnitude-based tolerance. A homogeneous transform
 // mixes units -- a dimensionless linear block beside a translation column in

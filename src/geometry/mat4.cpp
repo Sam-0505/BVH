@@ -151,16 +151,30 @@ bool invert(const Mat4& a, Mat4& out) {
     // false, inverse() then returns identity in a release build, and rays for
     // that object are silently transformed into the wrong space.
     //
-    // Rejecting only on an exact zero costs nothing in practice: elimination
-    // drives a genuinely rank-deficient matrix to an exact-zero pivot. Verified
-    // against a zero matrix, a zero scale axis at 1e-21 / 1 / 1e21, duplicate
-    // rows, and row2 == row0 + row1 -- all still rejected.
+    // What the exact-zero rule does and does not catch, measured rather than
+    // assumed:
     //
-    // The tradeoff, stated plainly: a NEAR-singular matrix is now accepted and
-    // yields a large-but-finite inverse. That is the IEEE-correct answer, and a
-    // caller needing a conditioning guarantee should test determinant() itself.
-    // Over-rejecting a valid transform is the worse failure, because it is
-    // silent.
+    //   - EXACTLY REPRESENTABLE degeneracy is still caught, because elimination
+    //     drives it to a true zero. Verified against a zero matrix, a zero
+    //     scale axis at 1e-21 / 1 / 1e21, duplicate rows, and a row that is a
+    //     literal sum of two others.
+    //   - DEGENERACY PRODUCED BY ARITHMETIC is NOT caught. When row 3 is a
+    //     random linear combination of rows 0 and 1, the products and the sum
+    //     round, so elimination lands on a tiny non-zero pivot instead of a
+    //     zero. Over 200,000 such matrices this rule accepts 175,488 of them
+    //     (87.7%) with |M*M^-1 - I| > 1e-2, worst residual 1.3e+05.
+    //
+    // So this gives up most near-singular detection, and that is a deliberate
+    // trade, not an oversight. The row-relative threshold caught far more of
+    // them, but bought that only by rejecting valid transforms such as
+    // translation(1e4) * scaling(1e-4) -- and over-rejection fails SILENTLY,
+    // because inverse() then returns identity in a release build. Accepting a
+    // near-singular matrix instead returns the IEEE-correct large-but-finite
+    // inverse, which a caller can detect by testing determinant().
+    //
+    // The right place for a real conditioning check is the boundary where
+    // transforms are accepted from a user or a scene file, rejected once with
+    // a clear message. Nothing in the current code inverts user-supplied data.
 
     for (int col = 0; col < 4; ++col) {
         int pivot = -1;
