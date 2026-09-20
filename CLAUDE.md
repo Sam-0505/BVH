@@ -80,20 +80,71 @@ docs/          subsystem docs + interview knowledge base
 
 ## Build and test
 
-CMake is not yet scaffolded. Fill these in with the real commands as soon as it lands, and
-keep them accurate — other agents rely on this section to verify work.
+```bash
+# Configure (Release is the default when CMAKE_BUILD_TYPE is unset)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
+# Build
+cmake --build build -j4
+
+# Test
+cd build && ctest --output-on-failure -j4
+#   or run the binary directly: ./build/tests/geometry_tests
+
+# Benchmark: not yet implemented (Phase 9)
 ```
-Configure:  TBD
-Build:      TBD
-Test:       TBD
-Benchmark:  TBD
-```
+
+Useful options:
+
+| Option | Default | Effect |
+|---|---|---|
+| `BVH_BUILD_TESTS` | ON | Build the GoogleTest suite |
+| `BVH_ENABLE_SANITIZERS` | OFF | `-fsanitize=address,undefined` |
+| `BVH_WARNINGS_AS_ERRORS` | OFF | `-Werror`; the tree is currently clean under it |
+
+GoogleTest is found via `find_package` and otherwise fetched (pinned to v1.15.2), so the
+first configure needs network access.
+
+`-ffast-math` must never be enabled. The intersection routines depend on IEEE-754 NaN and
+infinity behaviour; fast-math lets the compiler assume those never occur, which silently
+turns the NaN-tolerant slab test into a source of wrong answers.
 
 ## Platform
 
-Development is on macOS (Apple Silicon, Darwin 24.6). There is no native Vulkan driver —
-it runs through **MoltenVK** from the LunarG Vulkan SDK. Practical consequences:
+Development is on macOS (Darwin 24.6) on an **Intel** Core i5-8257U (2019 MacBook Pro,
+4 cores / 8 threads, 1.4 GHz base). Two consequences that shape the whole project:
+
+- **Integrated Iris Plus graphics.** GPU compute headroom is modest, so the Phase 8
+  CPU-vs-GPU comparison will not show the speedups a discrete GPU would. Report what the
+  hardware actually does; a modest or negative GPU speedup is a legitimate result and a
+  better interview answer than a fabricated one.
+- **4 physical cores** bounds the multithreaded BVH build comparison. Expect well under
+  4x, and attribute the gap (memory bandwidth, Amdahl, scheduling) from measurement.
+
+### Toolchain status — action needed
+
+The installed Command Line Tools are **Apple clang 11.0.3 (2020)**, far older than the OS.
+Consequences, in order of how soon they bite:
+
+- **Now:** there is no C++20 standard library (`<concepts>`, `<span>`, `<ranges>`,
+  `<numbers>` are all missing), and `-std=c++20` is not even a recognised flag. CMake
+  silently falls back to the draft `-std=c++2a` and still reports "20"; the configure step
+  probes for this and prints a warning. The geometry core builds and all tests pass this
+  way, so Phase 1 is not blocked — but the project cannot honestly claim C++20 yet.
+- **Soon:** Homebrew refuses to install anything needing compilation on this
+  configuration (`Error: Your Command Line Tools are too outdated`), which already blocked
+  `brew install llvm`. GLFW, the Vulkan SDK, and ImGui will hit the same wall.
+
+Fix (needs a GUI installer and sudo, so it has to be run by hand):
+
+```bash
+# Try Software Update in System Settings first; otherwise:
+sudo rm -rf /Library/Developer/CommandLineTools
+sudo xcode-select --install
+```
+
+There is no native Vulkan driver — Vulkan runs through **MoltenVK** from the LunarG
+Vulkan SDK. Practical consequences:
 
 - Enable `VK_KHR_portability_enumeration` on the instance and
   `VK_KHR_portability_subset` on the device, or device creation fails.

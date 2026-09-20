@@ -1,0 +1,209 @@
+#include <gtest/gtest.h>
+
+#include <cmath>
+
+#include "geometry/mat4.hpp"
+
+using namespace geom;
+
+namespace {
+
+// A transform with rotation, non-uniform scale and translation, so that tests
+// exercise the general case rather than a conveniently symmetric one.
+Mat4 makeCompositeTransform() {
+    return translation(Vec3(5.0f, -3.0f, 2.0f)) *
+           rotation(Vec3(1.0f, 2.0f, 3.0f), radians(37.0f)) *
+           scaling(Vec3(2.0f, 3.0f, 0.5f));
+}
+
+}  // namespace
+
+TEST(Mat4, IdentityIsMultiplicativeIdentity) {
+    const Mat4 id = Mat4::identity();
+    const Mat4 m = makeCompositeTransform();
+    EXPECT_TRUE(nearlyEqual(id * m, m));
+    EXPECT_TRUE(nearlyEqual(m * id, m));
+}
+
+TEST(Mat4, ColumnMajorStorageLayout) {
+    // Pins down the storage convention the Vulkan upload path depends on:
+    // translation lives in the fourth COLUMN, i.e. m[3][0..2].
+    const Mat4 t = translation(Vec3(7.0f, 8.0f, 9.0f));
+    EXPECT_FLOAT_EQ(t.m[3][0], 7.0f);
+    EXPECT_FLOAT_EQ(t.m[3][1], 8.0f);
+    EXPECT_FLOAT_EQ(t.m[3][2], 9.0f);
+    EXPECT_FLOAT_EQ(t.m[3][3], 1.0f);
+
+    // ...and not in the fourth row.
+    EXPECT_FLOAT_EQ(t.m[0][3], 0.0f);
+    EXPECT_FLOAT_EQ(t.m[1][3], 0.0f);
+    EXPECT_FLOAT_EQ(t.m[2][3], 0.0f);
+}
+
+TEST(Mat4, ColumnAndRowAccessors) {
+    const Mat4 t = translation(Vec3(7.0f, 8.0f, 9.0f));
+    EXPECT_EQ(t.column(3), Vec4(7.0f, 8.0f, 9.0f, 1.0f));
+    EXPECT_EQ(t.row(3), Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+}
+
+TEST(Mat4, TranslationMovesPointsButNotDirections) {
+    const Mat4 t = translation(Vec3(1.0f, 2.0f, 3.0f));
+    const Vec3 p(10.0f, 20.0f, 30.0f);
+
+    // A point picks up the translation...
+    EXPECT_TRUE(nearlyEqual(transformPoint(t, p), Vec3(11.0f, 22.0f, 33.0f)));
+    // ...a direction does not. This is the w=1 vs w=0 distinction.
+    EXPECT_TRUE(nearlyEqual(transformVector(t, p), p));
+}
+
+TEST(Mat4, Scaling) {
+    const Mat4 s = scaling(Vec3(2.0f, 3.0f, 4.0f));
+    EXPECT_TRUE(nearlyEqual(transformPoint(s, Vec3(1.0f, 1.0f, 1.0f)), Vec3(2.0f, 3.0f, 4.0f)));
+    // Unlike translation, scaling DOES affect directions.
+    EXPECT_TRUE(nearlyEqual(transformVector(s, Vec3(1.0f, 1.0f, 1.0f)), Vec3(2.0f, 3.0f, 4.0f)));
+}
+
+TEST(Mat4, AxisRotationsAreRightHanded) {
+    const Scalar quarter = radians(90.0f);
+
+    // Rotating +X by 90 degrees about Z gives +Y (right-handed).
+    EXPECT_TRUE(nearlyEqual(transformVector(rotationZ(quarter), Vec3(1.0f, 0.0f, 0.0f)),
+                            Vec3(0.0f, 1.0f, 0.0f), 1e-5f));
+    // +Y about X gives +Z.
+    EXPECT_TRUE(nearlyEqual(transformVector(rotationX(quarter), Vec3(0.0f, 1.0f, 0.0f)),
+                            Vec3(0.0f, 0.0f, 1.0f), 1e-5f));
+    // +Z about Y gives +X.
+    EXPECT_TRUE(nearlyEqual(transformVector(rotationY(quarter), Vec3(0.0f, 0.0f, 1.0f)),
+                            Vec3(1.0f, 0.0f, 0.0f), 1e-5f));
+}
+
+TEST(Mat4, RotationPreservesLength) {
+    const Mat4 r = rotation(Vec3(1.0f, 2.0f, 3.0f), radians(57.0f));
+    const Vec3 v(4.0f, -5.0f, 6.0f);
+    EXPECT_NEAR(length(transformVector(r, v)), length(v), 1e-4f);
+}
+
+TEST(Mat4, RotationAboutDegenerateAxisIsIdentity) {
+    // Must not produce NaN from normalising a zero-length axis.
+    const Mat4 r = rotation(Vec3(0.0f), radians(45.0f));
+    EXPECT_TRUE(nearlyEqual(r, Mat4::identity()));
+}
+
+TEST(Mat4, RotationAboutArbitraryAxisLeavesAxisFixed) {
+    const Vec3 axis = normalize(Vec3(1.0f, 2.0f, 3.0f));
+    const Mat4 r = rotation(axis, radians(73.0f));
+    // A vector along the rotation axis is unchanged by the rotation.
+    EXPECT_TRUE(nearlyEqual(transformVector(r, axis), axis, 1e-5f));
+}
+
+TEST(Mat4, MultiplicationAppliesRightmostFirst) {
+    // Column-vector convention: (A * B) * v means "apply B, then A".
+    const Mat4 t = translation(Vec3(10.0f, 0.0f, 0.0f));
+    const Mat4 s = scaling(Vec3(2.0f, 2.0f, 2.0f));
+    const Vec3 p(1.0f, 0.0f, 0.0f);
+
+    // Scale first (1 -> 2), then translate (2 -> 12).
+    EXPECT_TRUE(nearlyEqual(transformPoint(t * s, p), Vec3(12.0f, 0.0f, 0.0f)));
+    // Translate first (1 -> 11), then scale (11 -> 22).
+    EXPECT_TRUE(nearlyEqual(transformPoint(s * t, p), Vec3(22.0f, 0.0f, 0.0f)));
+}
+
+TEST(Mat4, Transpose) {
+    const Mat4 m = makeCompositeTransform();
+    const Mat4 t = transpose(m);
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) EXPECT_FLOAT_EQ(t.m[c][r], m.m[r][c]);
+
+    // Transpose is an involution.
+    EXPECT_TRUE(nearlyEqual(transpose(t), m));
+}
+
+TEST(Mat4, DeterminantOfIdentityAndScaling) {
+    EXPECT_NEAR(determinant(Mat4::identity()), 1.0f, 1e-5f);
+    // det of a pure scale is the product of the scale factors.
+    EXPECT_NEAR(determinant(scaling(Vec3(2.0f, 3.0f, 4.0f))), 24.0f, 1e-4f);
+    // A rotation preserves volume.
+    EXPECT_NEAR(determinant(rotation(Vec3(1.0f, 1.0f, 1.0f), radians(30.0f))), 1.0f, 1e-4f);
+}
+
+TEST(Mat4, InverseTimesOriginalIsIdentity) {
+    const Mat4 m = makeCompositeTransform();
+    Mat4 inv;
+    ASSERT_TRUE(invert(m, inv));
+
+    // The strongest available check on the inverse: both orderings must give I.
+    EXPECT_TRUE(nearlyEqual(m * inv, Mat4::identity(), 1e-4f));
+    EXPECT_TRUE(nearlyEqual(inv * m, Mat4::identity(), 1e-4f));
+}
+
+TEST(Mat4, InverseRoundTripsPoints) {
+    const Mat4 m = makeCompositeTransform();
+    const Mat4 inv = inverse(m);
+    const Vec3 p(3.0f, -7.0f, 11.0f);
+    EXPECT_TRUE(nearlyEqual(transformPoint(inv, transformPoint(m, p)), p, 1e-3f));
+}
+
+TEST(Mat4, InvertRejectsSingularMatrix) {
+    // A zero scale on one axis collapses the space; there is no inverse.
+    const Mat4 singular = scaling(Vec3(1.0f, 1.0f, 0.0f));
+    Mat4 out = Mat4::identity();
+    EXPECT_FALSE(invert(singular, out));
+    // On failure `out` must be left untouched rather than filled with NaN.
+    EXPECT_TRUE(nearlyEqual(out, Mat4::identity()));
+
+    const Mat4 zero = Mat4::zero();
+    EXPECT_FALSE(invert(zero, out));
+}
+
+TEST(Mat4, NormalTransformUnderNonUniformScale) {
+    // The classic bug this guards against: under non-uniform scale a normal does
+    // NOT transform like a direction. Take a plane spanned by X and Z with
+    // normal +Y, then scale Y by 2. The surface flattens relative to Y, so the
+    // correct transformed normal still points along +Y -- but transformVector
+    // would scale it by 2 in Y, which happens to keep the direction here, so use
+    // a tilted normal where the two answers genuinely differ.
+    const Mat4 s = scaling(Vec3(2.0f, 1.0f, 1.0f));
+    const Mat4 sInv = inverse(s);
+
+    // Surface tangent in the XY plane, and its perpendicular normal.
+    const Vec3 tangent(1.0f, 1.0f, 0.0f);
+    const Vec3 normalBefore(-1.0f, 1.0f, 0.0f);
+    ASSERT_NEAR(dot(tangent, normalBefore), 0.0f, 1e-6f);
+
+    const Vec3 tangentAfter = transformVector(s, tangent);
+    const Vec3 normalCorrect = transformNormalWithInverse(sInv, normalBefore);
+    const Vec3 normalWrong = transformVector(s, normalBefore);
+
+    // The inverse-transpose keeps the normal perpendicular to the surface.
+    EXPECT_NEAR(dot(tangentAfter, normalCorrect), 0.0f, 1e-5f);
+    // Transforming it as a direction does not.
+    EXPECT_GT(std::fabs(dot(normalize(tangentAfter), normalize(normalWrong))), 0.1f);
+}
+
+TEST(Mat4, TransformPointAppliesPerspectiveDivide) {
+    // A matrix with a non-trivial bottom row must trigger the divide by w.
+    // Bottom row becomes (0, 0, 1, 0), so w_out = z_in. Clearing m[3][3] is
+    // essential: identity leaves it at 1, which would give w_out = z_in + 1.
+    Mat4 m = Mat4::identity();
+    m.m[2][3] = 1.0f;  // column 2, row 3
+    m.m[3][3] = 0.0f;  // column 3, row 3
+
+    const Vec3 p(4.0f, 6.0f, 2.0f);
+    // w becomes 2, so the result is p/2.
+    EXPECT_TRUE(nearlyEqual(transformPoint(m, p), Vec3(2.0f, 3.0f, 1.0f), 1e-5f));
+
+    // And an affine matrix (w_out == 1) must skip the divide entirely.
+    const Mat4 affine = translation(Vec3(1.0f, 1.0f, 1.0f));
+    EXPECT_TRUE(nearlyEqual(transformPoint(affine, p), Vec3(5.0f, 7.0f, 3.0f), 1e-5f));
+}
+
+TEST(Mat4, MatrixVectorMultiplyMatchesManualExpansion) {
+    const Mat4 m = makeCompositeTransform();
+    const Vec4 v(1.0f, 2.0f, 3.0f, 1.0f);
+    const Vec4 got = m * v;
+    for (int r = 0; r < 4; ++r) {
+        const Scalar expected =
+            m.m[0][r] * v.x + m.m[1][r] * v.y + m.m[2][r] * v.z + m.m[3][r] * v.w;
+        EXPECT_NEAR(got[r], expected, 1e-5f);
+    }
+}
