@@ -1,12 +1,28 @@
 #pragma once
 
-#include <algorithm>
+#include <cassert>
 
 #include "geometry/ray.hpp"
 #include "geometry/scalar.hpp"
 #include "geometry/vec3.hpp"
 
 namespace geom {
+
+// Conservative widening factor applied to the ray/box exit distance.
+//
+// Defined as a constant rather than an #if at the use site so that disabling it
+// changes one value and nothing else. Set BVH_CONSERVATIVE_RAY_BOX=0 to measure
+// the exact test against the conservative one; see intersectRay for why this is
+// currently unproven and kept anyway.
+#ifndef BVH_CONSERVATIVE_RAY_BOX
+#define BVH_CONSERVATIVE_RAY_BOX 1
+#endif
+
+#if BVH_CONSERVATIVE_RAY_BOX
+inline constexpr Scalar kRayBoxWidening = Scalar(1) + Scalar(2) * gamma(3);
+#else
+inline constexpr Scalar kRayBoxWidening = Scalar(1);
+#endif
 
 // Axis-aligned bounding box, stored as min/max corners.
 //
@@ -53,7 +69,15 @@ struct AABB {
 
     constexpr Vec3 diagonal() const { return max - min; }
 
+    // Precondition: the box is not empty.
+    //
+    // On an empty box this is +inf + (-inf - +inf) * 0.5, which is NaN. That
+    // matters because Phase 2's SAH binning takes the centroid of a primitive
+    // range's bounds, and an empty range at a recursion boundary is exactly how
+    // you reach here -- a NaN centroid then propagates silently into a bin
+    // index and corrupts the tree instead of crashing.
     constexpr Vec3 centroid() const {
+        assert(!isEmpty() && "centroid() of an empty AABB is NaN");
         // Written as min + 0.5*(max-min) rather than 0.5*(min+max) to avoid
         // overflow to inf when both corners are large and same-signed.
         return min + (max - min) * Scalar(0.5);
@@ -89,6 +113,10 @@ struct AABB {
                p.z >= min.z && p.z <= max.z;
     }
 
+    // An empty argument is contained in anything: the empty set is a subset of
+    // every set. This looks asymmetric next to intersects(), which returns
+    // false for an empty box, but both follow the same set semantics --
+    // (empty subset A) is true, while (empty intersect A) is empty.
     constexpr bool contains(const AABB& b) const {
         if (b.isEmpty()) return true;
         return contains(b.min) && contains(b.max);
@@ -108,6 +136,7 @@ struct AABB {
     // axes (min == max) report 0 rather than dividing by zero. Used by SAH
     // binning to map a centroid to a bin index.
     constexpr Vec3 offset(const Vec3& p) const {
+        assert(!isEmpty() && "offset() against an empty AABB is meaningless");
         Vec3 o = p - min;
         if (max.x > min.x) o.x /= (max.x - min.x);
         if (max.y > min.y) o.y /= (max.y - min.y);
@@ -157,11 +186,22 @@ inline AABB intersection(const AABB& a, const AABB& b) {
 //     makes the degenerate axis a no-op -- conservative, and never a false miss.
 //
 //  2. ROUNDING AT GRAZING ANGLES. Each t is the result of a subtract and a
-//     multiply, so it carries relative error up to gamma(3). Left uncorrected, a
-//     ray passing exactly through a shared face between two sibling nodes can
-//     miss both. Widening the exit distance by (1 + 2*gamma(3)) makes the test
-//     conservative: it may report a hit fractionally outside the true box, which
-//     costs one wasted triangle test, but it will not produce a crack.
+//     multiply, so it carries relative error up to gamma(3). Widening the exit
+//     distance by (1 + 2*gamma(3)) makes the test conservative, so it may
+//     report a hit fractionally outside the true box -- costing a wasted
+//     primitive test -- rather than a false miss.
+//
+//     HONEST STATUS OF THIS WIDENING: it follows PBRT's error analysis
+//     (Pharr, Jakob & Humphreys, 3rd ed., sec. 3.9), which is sound. But no
+//     test in this repository demonstrates a failure it prevents, and a sweep
+//     of 3 million rays aimed at shared sibling faces found no difference with
+//     it removed. Its real justification arrives in Phase 2: watertightness
+//     matters between a node's bound and the triangle test inside it, and
+//     there is no triangle test yet. It is kept because a conservative bound
+//     is the safe default, and made switchable so Phase 9 can measure what it
+//     costs -- it is 3 of the 9 multiplies in this function, the innermost
+//     loop of the whole system. Do not restate the PBRT rationale as a
+//     measured result until there is a benchmark behind it.
 //
 // `tEnter` receives the entry distance when the function returns true. For a ray
 // originating inside the box that is tMin, not a negative distance.
@@ -192,8 +232,9 @@ inline bool intersectRay(const AABB& box, const Vec3& origin, const Vec3& invDir
             tFar = tmp;
         }
 
-        // Conservative widening -- see hazard 2 above.
-        tFar *= Scalar(1) + Scalar(2) * gamma(3);
+        // Conservative widening -- see hazard 2 above. kRayBoxWidening is
+        // exactly 1 when disabled, so the multiply folds away entirely.
+        tFar *= kRayBoxWidening;
 
         // NaN-tolerant narrowing -- see hazard 1 above. Do NOT replace with
         // std::max/std::min: their NaN behaviour is not guaranteed to match.

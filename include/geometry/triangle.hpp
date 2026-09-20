@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include "geometry/aabb.hpp"
 #include "geometry/scalar.hpp"
 #include "geometry/vec3.hpp"
@@ -47,9 +49,26 @@ struct Triangle {
     // a valid centroid, so a BVH can carry them without special-casing -- they
     // simply never report a hit.
     //
-    // Tested on squared area against a squared tolerance to avoid a sqrt.
+    // The test is DIMENSIONLESS, comparing a shape ratio rather than an absolute
+    // area. Writing it as `area <= tol` would make it scale-dependent: with an
+    // absolute tolerance of 1e-6, a perfectly healthy triangle with 1e-3 edges
+    // has area 5e-7 and would be flagged, and a unit-scale mesh of a million
+    // triangles has a mean triangle area near 6e-6 -- right at the threshold.
+    // A degeneracy predicate that fires on a tenth of a valid mesh is worse
+    // than none.
+    //
+    // Instead compare |cross| against tol * L^2, where L is the longest edge.
+    // Since |cross| == 2 * area == L * h for the height h above that edge, this
+    // is h/L <= tol -- a pure aspect ratio, invariant under uniform scaling.
+    // Squared on both sides to avoid a sqrt.
     bool isDegenerate(Scalar tol = kEpsilon) const {
-        return lengthSquared(normalUnnormalized()) <= (Scalar(2) * tol) * (Scalar(2) * tol);
+        const Scalar longestEdgeSq =
+            std::fmax(lengthSquared(edge01()),
+                      std::fmax(lengthSquared(edge02()), lengthSquared(v2 - v1)));
+        // All three vertices coincide: no edge, no shape, definitively degenerate.
+        if (longestEdgeSq == Scalar(0)) return true;
+        const Scalar limit = tol * longestEdgeSq;
+        return lengthSquared(normalUnnormalized()) <= limit * limit;
     }
 
     // Tight axis-aligned bounds. Exact: the extremes of a triangle are always

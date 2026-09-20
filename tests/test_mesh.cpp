@@ -98,17 +98,22 @@ TEST(Mesh, AcceptsEmptyMesh) {
     EXPECT_NO_THROW(Mesh({}, {}));
 }
 
-TEST(Mesh, VertexBoundsAreConservativeForOrphanVertices) {
-    // A vertex not referenced by any triangle still widens bounds(), while
-    // computeTriangleBounds() reports the tight answer.
+TEST(Mesh, BoundsAreTightAndVertexBoundsAreConservative) {
+    // A vertex no triangle references must NOT inflate bounds(): the SAH
+    // normalises child area against parent area, so an inflated root would
+    // shift every split decision and make benchmarks depend on file hygiene.
     std::vector<Vec3> positions = {
         {0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
         {100.0f, 100.0f, 100.0f},  // orphan
     };
     const Mesh m(std::move(positions), {0, 1, 2});
 
-    EXPECT_EQ(m.bounds().max, Vec3(100.0f));
-    EXPECT_EQ(m.computeTriangleBounds().max, Vec3(1.0f, 1.0f, 0.0f));
+    // Tight: covers only the referenced triangle.
+    EXPECT_EQ(m.bounds().max, Vec3(1.0f, 1.0f, 0.0f));
+    // Conservative: covers the whole vertex array.
+    EXPECT_EQ(m.vertexBounds().max, Vec3(100.0f));
+    // The conservative bound always contains the tight one.
+    EXPECT_TRUE(m.vertexBounds().contains(m.bounds()));
 }
 
 TEST(Mesh, CountsDegenerateTriangles) {
@@ -141,4 +146,23 @@ TEST(Mesh, TransformPreservesTopology) {
     m.transform(rotation(Vec3(0.0f, 1.0f, 0.0f), radians(45.0f)));
     EXPECT_EQ(m.indices(), before);
     EXPECT_EQ(m.triangleCount(), 12u);
+}
+
+TEST(Mesh, TransformWithNonAffineMatrixAppliesPerspectiveDivide) {
+    // Every other transform test uses an affine matrix, leaving the
+    // perspective-divide path in transformPoint unexercised from Mesh.
+    Mesh m = singleTriangle();  // vertices (0,0,0), (2,0,0), (0,3,0)
+
+    Mat4 projective = Mat4::identity();
+    projective.m[0][3] = 1.0f;  // w_out = x_in + 1
+    m.transform(projective);
+
+    // (0,0,0) -> w=1, unchanged. (2,0,0) -> w=3, so (2/3,0,0).
+    EXPECT_TRUE(nearlyEqual(m.triangle(0).v0, Vec3(0.0f, 0.0f, 0.0f), 1e-5f));
+    EXPECT_TRUE(nearlyEqual(m.triangle(0).v1, Vec3(2.0f / 3.0f, 0.0f, 0.0f), 1e-5f));
+    // (0,3,0) -> w=1, unchanged.
+    EXPECT_TRUE(nearlyEqual(m.triangle(0).v2, Vec3(0.0f, 3.0f, 0.0f), 1e-5f));
+
+    // Bounds must have been refreshed against the transformed positions.
+    EXPECT_TRUE(nearlyEqual(m.bounds().max, Vec3(2.0f / 3.0f, 3.0f, 0.0f), 1e-5f));
 }

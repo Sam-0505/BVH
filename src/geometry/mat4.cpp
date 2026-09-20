@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace geom {
@@ -110,33 +111,57 @@ bool invert(const Mat4& a, Mat4& out) {
     // transpose in and out rather than contort the algorithm.
     Scalar lhs[4][4];
     Scalar rhs[4][4]{};
+    Scalar rowScale[4];
     for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) lhs[r][c] = a.m[c][r];
+        Scalar rowMax = Scalar(0);
+        for (int c = 0; c < 4; ++c) {
+            lhs[r][c] = a.m[c][r];
+            rowMax = std::fmax(rowMax, std::fabs(lhs[r][c]));
+        }
+        // An all-zero row is rank-deficient at any scale.
+        if (rowMax == Scalar(0)) return false;
+        rowScale[r] = rowMax;
         rhs[r][r] = Scalar(1);
     }
 
+    // SCALED ("implicit") partial pivoting: each candidate pivot is judged
+    // relative to the largest entry in ITS OWN ROW, not in absolute terms and
+    // not against the whole matrix.
+    //
+    // Plain partial pivoting compares raw magnitudes, which makes the choice
+    // depend on how each row happens to be scaled -- multiply one equation
+    // through by 1e6 and it wins every pivot contest without being any better
+    // conditioned. Comparing against the whole matrix is just as wrong here,
+    // and specifically wrong for the matrices this project uses: a homogeneous
+    // transform always carries m[3][3] == 1, so `scaling(1e-21)` has a global
+    // maximum of 1 while every pivot that matters is 1e-21. A matrix-norm
+    // threshold rejects it, even though it is perfectly invertible.
+    //
+    // Row-relative ratios are dimensionless and in [0, 1], so the tolerance is
+    // a pure precision figure with no units to get wrong.
+    constexpr Scalar kPivotTolerance = std::numeric_limits<Scalar>::epsilon() * Scalar(8);
+
     for (int col = 0; col < 4; ++col) {
-        // Partial pivoting: choose the row with the largest magnitude in this
-        // column. This is what keeps the elimination stable -- dividing by a
-        // near-zero pivot amplifies existing rounding error without it.
-        int pivot = col;
-        Scalar best = std::fabs(lhs[col][col]);
-        for (int r = col + 1; r < 4; ++r) {
-            const Scalar mag = std::fabs(lhs[r][col]);
-            if (mag > best) {
-                best = mag;
+        int pivot = -1;
+        Scalar best = Scalar(0);
+        for (int r = col; r < 4; ++r) {
+            const Scalar ratio = std::fabs(lhs[r][col]) / rowScale[r];
+            if (ratio > best) {
+                best = ratio;
                 pivot = r;
             }
         }
 
         // Singular to working precision. Reject rather than produce inf/NaN.
-        if (best <= Scalar(1e-20)) return false;
+        if (pivot < 0 || best <= kPivotTolerance) return false;
 
         if (pivot != col) {
             for (int c = 0; c < 4; ++c) {
                 std::swap(lhs[col][c], lhs[pivot][c]);
                 std::swap(rhs[col][c], rhs[pivot][c]);
             }
+            // The scales are a property of the rows, so they travel with them.
+            std::swap(rowScale[col], rowScale[pivot]);
         }
 
         const Scalar invPivot = Scalar(1) / lhs[col][col];

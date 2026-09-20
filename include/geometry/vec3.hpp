@@ -41,7 +41,7 @@ struct Vec3 {
     constexpr Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
     constexpr Vec3& operator-=(const Vec3& o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
     constexpr Vec3& operator*=(Scalar s) { x *= s; y *= s; z *= s; return *this; }
-    constexpr Vec3& operator/=(Scalar s) { x /= s; y /= s; z /= s; return *this; }
+    Vec3& operator/=(Scalar s);
 
     // Exact bitwise-value comparison. Useful for tests over exactly-representable
     // values and for detecting "unchanged"; never use it to compare results of
@@ -57,7 +57,30 @@ constexpr Vec3 operator-(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y 
 constexpr Vec3 operator-(const Vec3& v) { return {-v.x, -v.y, -v.z}; }
 constexpr Vec3 operator*(const Vec3& v, Scalar s) { return {v.x * s, v.y * s, v.z * s}; }
 constexpr Vec3 operator*(Scalar s, const Vec3& v) { return v * s; }
-constexpr Vec3 operator/(const Vec3& v, Scalar s) { return {v.x / s, v.y / s, v.z / s}; }
+// Division by a zero scalar is undefined behaviour ([expr.mul]/4) even for
+// floating point, where IEEE-754 would give +/-inf. The zero case is branched
+// out and the IEEE answer reproduced by multiplying by the signed infinity:
+// x * (+/-inf) is +/-inf with the correct sign, and 0 * inf is NaN -- exactly
+// what x/0 and 0/0 produce.
+//
+// The non-zero path keeps a true divide rather than multiplying by a
+// reciprocal everywhere. Multiply-by-reciprocal is faster but adds a second
+// rounding step, and it overflows to infinity for a denormal divisor where the
+// true quotient is finite. This is not a hot path, so correctness wins.
+inline Vec3 operator/(const Vec3& v, Scalar s) {
+    if (s == Scalar(0)) {
+        const Scalar inf = safeReciprocal(s);
+        return {v.x * inf, v.y * inf, v.z * inf};
+    }
+    return {v.x / s, v.y / s, v.z / s};
+}
+
+// Defined out of line because it forwards to the guarded operator/ above, which
+// is not visible from inside the class body.
+inline Vec3& Vec3::operator/=(Scalar s) {
+    *this = *this / s;
+    return *this;
+}
 
 // Component-wise (Hadamard) product. Distinct from dot/cross; used for scaling
 // along axes and for the ray/slab test's reciprocal-direction multiply.
@@ -75,9 +98,13 @@ constexpr Vec3 cross(const Vec3& a, const Vec3& b) {
 constexpr Scalar lengthSquared(const Vec3& v) { return dot(v, v); }
 inline Scalar length(const Vec3& v) { return std::sqrt(lengthSquared(v)); }
 
-// Precondition: v is not the zero vector. Dividing by a zero length yields
-// inf/NaN rather than throwing -- callers that cannot guarantee a non-degenerate
-// input must use normalizeSafe().
+// Precondition: v is not the zero vector.
+//
+// A zero-length input is a programming error, caught by the assert in a debug
+// build. In a release build the assert is gone, so the division must still be
+// well-defined -- operator/ above guarantees that, yielding inf/NaN rather than
+// undefined behaviour. Callers that cannot guarantee a non-degenerate input
+// must use normalizeSafe() instead of relying on that fallback.
 inline Vec3 normalize(const Vec3& v) {
     const Scalar len = length(v);
     assert(len > Scalar(0) && "normalize() on a zero-length vector");

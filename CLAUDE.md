@@ -94,6 +94,21 @@ cd build && ctest --output-on-failure -j4
 # Benchmark: not yet implemented (Phase 9)
 ```
 
+**Both configurations must pass before a milestone is done.** Release is what ships and
+what benchmarks run under, but `-DNDEBUG` strips every `assert`, so a Release-only test
+run never exercises a single precondition:
+
+```bash
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j4
+cd build-debug && ctest --output-on-failure -j4
+```
+
+The error-handling policy this validates: the `Mesh` constructor **throws**, because that
+is the trust boundary where untrusted file data enters. Everywhere else a violated
+precondition is a programming error and **asserts**. That policy is only real if the
+asserting build is actually run.
+
 Useful options:
 
 | Option | Default | Effect |
@@ -101,6 +116,7 @@ Useful options:
 | `BVH_BUILD_TESTS` | ON | Build the GoogleTest suite |
 | `BVH_ENABLE_SANITIZERS` | OFF | `-fsanitize=address,undefined` |
 | `BVH_WARNINGS_AS_ERRORS` | OFF | `-Werror`; the tree is currently clean under it |
+| `BVH_CONSERVATIVE_RAY_BOX` | ON | Widen the ray/AABB exit distance for watertightness. Off measures the exact test against it (Phase 9) |
 
 GoogleTest is found via `find_package` and otherwise fetched (pinned to v1.15.2), so the
 first configure needs network access.

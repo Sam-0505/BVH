@@ -106,3 +106,38 @@ TEST(Triangle, DegenerateDetectionDuplicateVertices) {
 TEST(Triangle, NonDegenerateTriangleIsNotFlagged) {
     EXPECT_FALSE(unitTriangle().isDegenerate());
 }
+
+TEST(Triangle, DegeneracyTestIsScaleInvariant) {
+    // The predicate compares a shape ratio, not an absolute area. A small but
+    // perfectly well-formed triangle must NOT be flagged: with an absolute
+    // 1e-6 area threshold, this one (area 5e-7) would have been.
+    const Triangle small(Vec3(0.0f), Vec3(1e-3f, 0.0f, 0.0f), Vec3(0.0f, 1e-3f, 0.0f));
+    EXPECT_NEAR(small.area(), 5e-7f, 1e-9f);
+    EXPECT_FALSE(small.isDegenerate());
+
+    // The same shape at unit and at large scale agrees.
+    const Triangle unit(Vec3(0.0f), Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Triangle huge(Vec3(0.0f), Vec3(1e5f, 0.0f, 0.0f), Vec3(0.0f, 1e5f, 0.0f));
+    EXPECT_FALSE(unit.isDegenerate());
+    EXPECT_FALSE(huge.isDegenerate());
+}
+
+TEST(Triangle, SliverIsDegenerateAtEveryScale) {
+    // A needle-thin triangle is degenerate regardless of how large it is --
+    // the aspect ratio, not the area, is what decides.
+    for (const Scalar scale : {1e-3f, 1.0f, 1e5f}) {
+        const Triangle sliver(Vec3(0.0f), Vec3(scale, 0.0f, 0.0f),
+                              Vec3(scale * 0.5f, scale * 1e-9f, 0.0f));
+        EXPECT_TRUE(sliver.isDegenerate()) << "sliver at scale " << scale;
+    }
+}
+
+TEST(Triangle, DegeneracyMatchesAcrossUniformScaling) {
+    // Uniform scaling must never change the verdict, for any shape.
+    const Triangle base(Vec3(0.1f, 0.2f, 0.3f), Vec3(0.4f, 0.1f, 0.9f), Vec3(0.7f, 0.8f, 0.2f));
+    const bool verdict = base.isDegenerate();
+    for (const Scalar scale : {1e-4f, 1e-2f, 1.0f, 1e2f, 1e4f}) {
+        const Triangle scaled(base.v0 * scale, base.v1 * scale, base.v2 * scale);
+        EXPECT_EQ(scaled.isDegenerate(), verdict) << "scale " << scale;
+    }
+}

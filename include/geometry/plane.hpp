@@ -19,8 +19,12 @@ struct Plane {
     constexpr Plane(const Vec3& n, Scalar dv) : normal(n), d(dv) {}
 
     // Plane through `point` with the given normal.
+    //
+    // Uses normalizeSafe for the same reason fromPoints does: `n` is
+    // caller-supplied and a zero normal is a degenerate plane, not a crash or a
+    // NaN. Check isDegenerate() if the distinction matters.
     static Plane fromPointNormal(const Vec3& point, const Vec3& n) {
-        const Vec3 unit = normalize(n);
+        const Vec3 unit = normalizeSafe(n);
         return Plane(unit, -dot(unit, point));
     }
 

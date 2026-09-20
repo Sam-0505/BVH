@@ -49,6 +49,8 @@ if(NOT BVH_HAS_REAL_CXX20)
 endif()
 
 option(BVH_BUILD_TESTS "Build the unit test suite" ON)
+option(BVH_CONSERVATIVE_RAY_BOX
+       "Widen the ray/AABB exit distance by (1 + 2*gamma(3)) for watertightness" ON)
 option(BVH_ENABLE_SANITIZERS "Build with Address and UndefinedBehavior sanitizers" OFF)
 option(BVH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
@@ -83,6 +85,15 @@ endif()
 # fast-math permits the compiler to assume those never occur, which turns the
 # NaN-tolerant slab test into a source of wrong answers rather than a speedup.
 
+# Carried on the shared options target so every translation unit agrees -- a
+# header-inline function compiled with different values in different TUs would
+# be an ODR violation.
+if(BVH_CONSERVATIVE_RAY_BOX)
+    target_compile_definitions(bvh_project_options INTERFACE BVH_CONSERVATIVE_RAY_BOX=1)
+else()
+    target_compile_definitions(bvh_project_options INTERFACE BVH_CONSERVATIVE_RAY_BOX=0)
+endif()
+
 if(BVH_ENABLE_SANITIZERS)
     target_compile_options(bvh_project_options INTERFACE
         -fsanitize=address,undefined -fno-omit-frame-pointer -g)
@@ -108,10 +119,9 @@ target_include_directories(bvh_geometry PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(bvh_geometry PRIVATE bvh_project_options)
-
-# Consumers get the warning settings too, so a mistake in a test is caught the
-# same way as one in the library.
+# PUBLIC so consumers get the warning settings too -- a mistake in a test is
+# caught the same way as one in the library. BUILD_INTERFACE keeps the options
+# out of any installed package config.
 target_link_libraries(bvh_geometry PUBLIC $<BUILD_INTERFACE:bvh_project_options>)
 
 add_library(bvh::geometry ALIAS bvh_geometry)
@@ -136,4 +146,10 @@ else()
 endif()
 message(STATUS "  tests .............. ${BVH_BUILD_TESTS}")
 message(STATUS "  sanitizers ......... ${BVH_ENABLE_SANITIZERS}")
+message(STATUS "  conservative r/box . ${BVH_CONSERVATIVE_RAY_BOX}")
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(STATUS "  asserts ............ DISABLED (-DNDEBUG); use Debug to exercise preconditions")
+else()
+    message(STATUS "  asserts ............ enabled")
+endif()
 message(STATUS "")

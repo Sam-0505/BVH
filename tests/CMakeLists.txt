@@ -27,8 +27,10 @@ add_executable(geometry_tests
     test_ray.cpp
     test_plane.cpp
     test_aabb.cpp
+    test_aabb_property.cpp
     test_triangle.cpp
     test_mesh.cpp
+    test_preconditions.cpp
 )
 
 target_link_libraries(geometry_tests PRIVATE

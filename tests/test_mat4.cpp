@@ -207,3 +207,60 @@ TEST(Mat4, MatrixVectorMultiplyMatchesManualExpansion) {
         EXPECT_NEAR(got[r], expected, 1e-5f);
     }
 }
+
+TEST(Mat4, FromColumnsMatchesStorageOrder) {
+    // fromColumns had no coverage at all. It is the constructor that most
+    // directly encodes the column-major convention, so getting it wrong would
+    // silently transpose every matrix built through it.
+    const Vec4 c0(1.0f, 2.0f, 3.0f, 4.0f);
+    const Vec4 c1(5.0f, 6.0f, 7.0f, 8.0f);
+    const Vec4 c2(9.0f, 10.0f, 11.0f, 12.0f);
+    const Vec4 c3(13.0f, 14.0f, 15.0f, 16.0f);
+    const Mat4 m = Mat4::fromColumns(c0, c1, c2, c3);
+
+    EXPECT_EQ(m.column(0), c0);
+    EXPECT_EQ(m.column(1), c1);
+    EXPECT_EQ(m.column(2), c2);
+    EXPECT_EQ(m.column(3), c3);
+
+    // Rows are the transpose of what was supplied.
+    EXPECT_EQ(m.row(0), Vec4(1.0f, 5.0f, 9.0f, 13.0f));
+
+    // Raw storage is m[column][row].
+    EXPECT_FLOAT_EQ(m.m[0][0], 1.0f);
+    EXPECT_FLOAT_EQ(m.m[0][1], 2.0f);
+    EXPECT_FLOAT_EQ(m.m[1][0], 5.0f);
+}
+
+TEST(Mat4, FromColumnsCanRebuildIdentity) {
+    const Mat4 id = Mat4::fromColumns(Vec4(1.0f, 0.0f, 0.0f, 0.0f), Vec4(0.0f, 1.0f, 0.0f, 0.0f),
+                                      Vec4(0.0f, 0.0f, 1.0f, 0.0f), Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+    EXPECT_TRUE(nearlyEqual(id, Mat4::identity()));
+}
+
+TEST(Mat4, InvertAcceptsUniformlyTinyButInvertibleMatrices) {
+    // The singularity threshold is relative, not absolute. scaling(1e-21) has
+    // every entry far below any fixed cutoff yet is perfectly invertible; an
+    // absolute threshold would wrongly reject it.
+    const Mat4 tiny = scaling(Vec3(1e-21f, 1e-21f, 1e-21f));
+    Mat4 inv;
+    EXPECT_TRUE(invert(tiny, inv));
+    EXPECT_TRUE(nearlyEqual(tiny * inv, Mat4::identity(), 1e-4f));
+
+    // ...while a genuinely rank-deficient matrix is still rejected at any scale.
+    Mat4 out = Mat4::identity();
+    EXPECT_FALSE(invert(scaling(Vec3(1e-21f, 1e-21f, 0.0f)), out));
+    EXPECT_FALSE(invert(scaling(Vec3(1e21f, 1e21f, 0.0f)), out));
+}
+
+TEST(Mat4, NormalTransformDoesNotPreserveLength) {
+    // Documented behaviour worth pinning: the inverse transpose preserves
+    // perpendicularity, not magnitude. Callers that need a unit normal must
+    // normalize the result themselves.
+    const Mat4 s = scaling(Vec3(4.0f, 4.0f, 4.0f));
+    const Vec3 n(0.0f, 1.0f, 0.0f);
+    const Vec3 transformed = transformNormalWithInverse(inverse(s), n);
+    EXPECT_NEAR(length(transformed), 0.25f, 1e-5f);
+    // Direction is unchanged under a uniform scale.
+    EXPECT_TRUE(nearlyEqual(normalize(transformed), n, 1e-5f));
+}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -48,8 +49,15 @@ public:
     const std::vector<std::uint32_t>& indices() const { return indices_; }
 
     // The three vertex indices of triangle i.
+    //
+    // Precondition: i < triangleCount(). The constructor validates the CONTENTS
+    // of the index buffer, but `i` is caller-supplied and outside that
+    // invariant, so it is checked separately. Phase 2 will call this from a loop
+    // bounded by a node's primitive range, which is exactly where an off-by-one
+    // would land.
     void triangleIndices(std::size_t i, std::uint32_t& a, std::uint32_t& b,
                          std::uint32_t& c) const {
+        assert(i < triangleCount() && "triangle index out of range");
         const std::size_t base = i * 3;
         a = indices_[base + 0];
         b = indices_[base + 1];
@@ -59,23 +67,27 @@ public:
     // Materialise triangle i. Returned by value: 36 bytes is cheaper to copy
     // than to alias, and returning a value keeps the Mesh immutable to callers.
     Triangle triangle(std::size_t i) const {
+        assert(i < triangleCount() && "triangle index out of range");
         const std::size_t base = i * 3;
         return Triangle(positions_[indices_[base + 0]],
                         positions_[indices_[base + 1]],
                         positions_[indices_[base + 2]]);
     }
 
-    // Bounds over all VERTICES, cached at construction.
+    // Tight bounds over the vertices actually REFERENCED by the index buffer,
+    // computed once at construction.
     //
-    // Note this bounds the vertex array, not the referenced triangles. For a
-    // mesh with unreferenced ("orphan") vertices the result is conservative --
-    // still correct as a bound, just looser. computeTriangleBounds() below gives
-    // the tight answer at O(n) cost when that matters.
+    // This is the geometry's true extent, and it is what a BVH build must use.
+    // The SAH normalises each child's surface area against its parent's, so a
+    // root inflated by unreferenced vertices would shift every split decision
+    // and make benchmark numbers depend on how clean the input file happens to
+    // be. Use vertexBounds() when you specifically want the vertex array's
+    // extent, for example when sizing a GPU vertex buffer.
     const AABB& bounds() const { return bounds_; }
 
-    // Tight bounds over only the vertices actually referenced by the index
-    // buffer. O(triangleCount).
-    AABB computeTriangleBounds() const;
+    // Bounds over the whole VERTEX ARRAY, including any vertex no triangle
+    // references. Conservative: always contains bounds(), sometimes larger.
+    const AABB& vertexBounds() const { return vertexBounds_; }
 
     // Number of triangles with zero area, which cannot be hit by a ray. Reported
     // rather than silently dropped, so mesh quality is visible in benchmarks
@@ -93,7 +105,8 @@ private:
 
     std::vector<Vec3> positions_;
     std::vector<std::uint32_t> indices_;
-    AABB bounds_;
+    AABB bounds_;        // referenced geometry (tight)
+    AABB vertexBounds_;  // whole vertex array (conservative)
 };
 
 }  // namespace geom

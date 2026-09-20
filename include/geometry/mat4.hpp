@@ -85,7 +85,7 @@ Vec4 operator*(const Mat4& a, const Vec4& v);
 Mat4 transpose(const Mat4& a);
 Scalar determinant(const Mat4& a);
 
-// Inverse via Gauss-Jordan elimination with partial pivoting.
+// Inverse via Gauss-Jordan elimination with SCALED partial pivoting.
 //
 // Cofactor expansion is the usual choice for a fixed 4x4 and is faster, but it is
 // less numerically stable and this is not a hot path -- transforms are built once
@@ -94,7 +94,11 @@ Scalar determinant(const Mat4& a);
 // wrong intersection rather than a slightly wrong pixel.
 //
 // Returns false and leaves `out` untouched when the matrix is singular to within
-// the pivot tolerance.
+// the pivot tolerance. That tolerance is applied to each pivot RELATIVE TO ITS
+// OWN ROW, which is scale-invariant: an absolute threshold would reject a
+// uniformly tiny but perfectly invertible matrix, and a whole-matrix threshold
+// fails specifically on homogeneous transforms, where m[3][3] == 1 dwarfs a
+// small linear part. See the implementation for the full argument.
 bool invert(const Mat4& a, Mat4& out);
 
 // Convenience wrapper: asserts invertibility in debug, returns identity for a
@@ -106,6 +110,12 @@ Mat4 inverse(const Mat4& a);
 // Transform a POSITION: w = 1, so translation applies. Performs the perspective
 // divide when the resulting w is not 1, which makes this correct for projection
 // matrices as well as affine ones.
+//
+// Three cases, not two: w == 1 skips the divide (the affine fast path), w == 0
+// also skips it and returns the raw xyz. A point that projects to w == 0 lies
+// on the eye plane and has no finite projected position, so there is no correct
+// answer to return; the raw direction-like vector is at least finite, where
+// dividing would give infinities or NaN.
 Vec3 transformPoint(const Mat4& a, const Vec3& p);
 
 // Transform a DIRECTION: w = 0, so translation does not apply. Length is NOT
@@ -122,6 +132,11 @@ Vec3 transformVector(const Mat4& a, const Vec3& v);
 //
 // Takes the ALREADY-INVERTED matrix so callers transforming many normals do not
 // pay for a matrix inverse each time.
+//
+// THE RESULT IS NOT UNIT LENGTH, even for a unit input: the inverse transpose
+// preserves perpendicularity, not magnitude. A unit normal through the inverse
+// of a uniform 4x scale comes back with length 1/4. Normalize the result if you
+// need a unit normal; shading does, a sidedness test does not.
 Vec3 transformNormalWithInverse(const Mat4& inverseTransform, const Vec3& n);
 
 inline bool nearlyEqual(const Mat4& a, const Mat4& b, Scalar tol = kEpsilon) {
