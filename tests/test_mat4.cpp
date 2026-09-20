@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <utility>
 
 #include "geometry/mat4.hpp"
 
@@ -236,6 +237,101 @@ TEST(Mat4, FromColumnsCanRebuildIdentity) {
     const Mat4 id = Mat4::fromColumns(Vec4(1.0f, 0.0f, 0.0f, 0.0f), Vec4(0.0f, 1.0f, 0.0f, 0.0f),
                                       Vec4(0.0f, 0.0f, 1.0f, 0.0f), Vec4(0.0f, 0.0f, 0.0f, 1.0f));
     EXPECT_TRUE(nearlyEqual(id, Mat4::identity()));
+}
+
+TEST(Mat4, InvertHandlesSmallObjectsFarFromTheOrigin) {
+    // A millimetre-scale part 10 km from the origin: linear part 1e-4,
+    // translation 1e4. An ordinary CAD/scene transform, not a pathological one.
+    //
+    // This is the case that a row-relative pivot tolerance rejects: row 0 is
+    // (1e-4, 0, 0, 1e4), so the pivot ratio is 1e-8, below any epsilon-based
+    // cutoff -- even though the matrix inverts exactly. The failure is silent,
+    // because inverse() returns identity in a release build.
+    const Mat4 m = translation(Vec3(1e4f, 1e4f, 1e4f)) * scaling(Vec3(1e-4f, 1e-4f, 1e-4f));
+    Mat4 inv;
+    ASSERT_TRUE(invert(m, inv));
+    EXPECT_TRUE(nearlyEqual(m * inv, Mat4::identity(), 1e-4f));
+}
+
+TEST(Mat4, InvertHandlesWideRangesOfScaleAndTranslation) {
+    // The same hazard swept across several decades. A row-scaled tolerance
+    // rejected the last three outright.
+    //
+    // Correctness is checked against the ANALYTIC inverse rather than by
+    // round-tripping a point. For M = T(t) * S(s) the inverse is exactly
+    // S(1/s) * T(-t), so this tests the elimination directly, without
+    // conflating it with the precision limits of the forward transform (see
+    // the next test).
+    const std::pair<Scalar, Scalar> cases[] = {
+        {1e-2f, 1e2f}, {1e-3f, 1e3f}, {1e-4f, 1e4f}, {1e-6f, 1e6f}, {1e-3f, 1e6f},
+    };
+    for (const auto& [scale, trans] : cases) {
+        const Mat4 m = translation(Vec3(trans, trans, trans)) * scaling(Vec3(scale, scale, scale));
+        Mat4 inv;
+        ASSERT_TRUE(invert(m, inv)) << "rejected scale " << scale << " at translation " << trans;
+
+        const Mat4 analytic = scaling(Vec3(1.0f / scale, 1.0f / scale, 1.0f / scale)) *
+                              translation(Vec3(-trans, -trans, -trans));
+        // Relative comparison: the translation entries of the inverse reach
+        // 1e12 for the widest case, where an absolute tolerance is meaningless.
+        EXPECT_TRUE(nearlyEqual(inv, analytic, 1e-4f))
+            << "inverse is wrong at scale " << scale << " translation " << trans;
+    }
+}
+
+TEST(Mat4, RoundTripPrecisionIsLimitedByScaleToTranslationRatio) {
+    // Documents a real limit of float32, not a defect in invert().
+    //
+    // Transforming a unit-scale point by S(s) then T(t) makes its contribution
+    // s while the coordinate sits at t. Once s/t falls below the float epsilon
+    // (~1.2e-7) that contribution is below one ULP at t and is destroyed by
+    // the FORWARD transform. No inverse can recover it -- the information is
+    // already gone.
+    //
+    // This is why the test above compares against the analytic inverse, and
+    // why Phase 2 should keep scene geometry near the origin rather than
+    // relying on large world offsets.
+    const Vec3 p(0.3f, -0.7f, 0.5f);
+
+    // Ratio 1e-4: comfortably inside float precision, round-trip is accurate.
+    {
+        const Mat4 m = translation(Vec3(1e2f, 1e2f, 1e2f)) * scaling(Vec3(1e-2f, 1e-2f, 1e-2f));
+        const Mat4 inv = inverse(m);
+        EXPECT_TRUE(nearlyEqual(transformPoint(inv, transformPoint(m, p)), p, 1e-2f));
+    }
+
+    // Ratio 1e-8: past the float epsilon, so the round-trip is lossy even
+    // though the inverse itself is correct. Asserted so the limit is pinned
+    // rather than discovered later in a debugging session.
+    {
+        const Mat4 m = translation(Vec3(1e4f, 1e4f, 1e4f)) * scaling(Vec3(1e-4f, 1e-4f, 1e-4f));
+        Mat4 inv;
+        ASSERT_TRUE(invert(m, inv));
+        const Vec3 roundTripped = transformPoint(inv, transformPoint(m, p));
+        EXPECT_FALSE(nearlyEqual(roundTripped, p, 1e-2f))
+            << "float32 unexpectedly preserved a 1e-8 scale ratio; if this starts "
+               "passing, Scalar may have been widened to double";
+    }
+}
+
+TEST(Mat4, InvertStillRejectsGenuinelySingularMatricesAtEveryScale) {
+    // Removing the magnitude tolerance must not weaken singularity detection.
+    // Elimination drives each of these to an exact-zero pivot.
+    Mat4 out;
+    EXPECT_FALSE(invert(Mat4::zero(), out));
+    EXPECT_FALSE(invert(scaling(Vec3(1.0f, 1.0f, 0.0f)), out));
+    EXPECT_FALSE(invert(scaling(Vec3(1e-21f, 1e-21f, 0.0f)), out));
+    EXPECT_FALSE(invert(scaling(Vec3(1e21f, 1e21f, 0.0f)), out));
+
+    // Rank deficiency that is not a zero scale: two identical rows.
+    Mat4 duplicateRows = Mat4::identity();
+    for (int c = 0; c < 4; ++c) duplicateRows.m[c][1] = duplicateRows.m[c][0];
+    EXPECT_FALSE(invert(duplicateRows, out));
+
+    // ...and a row that is a linear combination of two others.
+    Mat4 dependent = Mat4::identity();
+    for (int c = 0; c < 4; ++c) dependent.m[c][2] = dependent.m[c][0] + dependent.m[c][1];
+    EXPECT_FALSE(invert(dependent, out));
 }
 
 TEST(Mat4, InvertAcceptsUniformlyTinyButInvertibleMatrices) {

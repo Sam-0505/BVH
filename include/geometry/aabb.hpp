@@ -14,6 +14,16 @@ namespace geom {
 // changes one value and nothing else. Set BVH_CONSERVATIVE_RAY_BOX=0 to measure
 // the exact test against the conservative one; see intersectRay for why this is
 // currently unproven and kept anyway.
+//
+// The macro is set for the whole build by the bvh_project_options target, not
+// per translation unit, because intersectRay is an inline function: two TUs
+// compiled with different values would be an ODR violation with no diagnostic.
+// The self-default below exists only so the header is usable standalone. A
+// consumer that includes it WITHOUT linking bvh_project_options, while the
+// build has the option OFF, would silently get the conservative version and
+// disagree with the rest of the program. Nothing in this tree does that; it
+// becomes a real hazard only if the library grows out-of-tree consumers, at
+// which point this should move into a generated config header.
 #ifndef BVH_CONSERVATIVE_RAY_BOX
 #define BVH_CONSERVATIVE_RAY_BOX 1
 #endif

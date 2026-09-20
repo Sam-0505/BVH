@@ -124,36 +124,60 @@ bool invert(const Mat4& a, Mat4& out) {
         rhs[r][r] = Scalar(1);
     }
 
-    // SCALED ("implicit") partial pivoting: each candidate pivot is judged
-    // relative to the largest entry in ITS OWN ROW, not in absolute terms and
-    // not against the whole matrix.
+    // SELECTING the pivot and DETECTING singularity are two different questions,
+    // and conflating them is a trap. What follows keeps them apart.
     //
-    // Plain partial pivoting compares raw magnitudes, which makes the choice
-    // depend on how each row happens to be scaled -- multiply one equation
-    // through by 1e6 and it wins every pivot contest without being any better
-    // conditioned. Comparing against the whole matrix is just as wrong here,
-    // and specifically wrong for the matrices this project uses: a homogeneous
-    // transform always carries m[3][3] == 1, so `scaling(1e-21)` has a global
-    // maximum of 1 while every pivot that matters is 1e-21. A matrix-norm
-    // threshold rejects it, even though it is perfectly invertible.
+    // SELECTION uses scaled ("implicit") partial pivoting: each candidate is
+    // judged relative to the largest entry in its own row. This is the textbook
+    // choice and it is what keeps elimination stable when rows are scaled
+    // differently -- with raw magnitudes, multiplying one equation through by
+    // 1e6 wins it every pivot contest without making it better conditioned.
     //
-    // Row-relative ratios are dimensionless and in [0, 1], so the tolerance is
-    // a pure precision figure with no units to get wrong.
-    constexpr Scalar kPivotTolerance = std::numeric_limits<Scalar>::epsilon() * Scalar(8);
+    // DETECTION rejects only an exactly-zero pivot. Every magnitude-based
+    // tolerance tried here was wrong, because a homogeneous transform has no
+    // single scale to measure against:
+    //
+    //   - An ABSOLUTE threshold (1e-20) rejects scaling(1e-21), which inverts
+    //     exactly.
+    //   - A WHOLE-MATRIX threshold rejects it too: m[3][3] == 1 dominates, so
+    //     every pivot that matters looks negligible beside it.
+    //   - A ROW-RELATIVE threshold rejects translation(1e4) * scaling(1e-4) --
+    //     a millimetre-scale part 10 km from the origin, an ordinary CAD
+    //     transform. Row 0 is (1e-4, 0, 0, 1e4), so the ratio is 1e-8, under
+    //     any epsilon-based cutoff. The linear part and the translation column
+    //     are in different units; comparing them is meaningless.
+    //
+    // That last one is the worst failure of the three, because invert() returns
+    // false, inverse() then returns identity in a release build, and rays for
+    // that object are silently transformed into the wrong space.
+    //
+    // Rejecting only on an exact zero costs nothing in practice: elimination
+    // drives a genuinely rank-deficient matrix to an exact-zero pivot. Verified
+    // against a zero matrix, a zero scale axis at 1e-21 / 1 / 1e21, duplicate
+    // rows, and row2 == row0 + row1 -- all still rejected.
+    //
+    // The tradeoff, stated plainly: a NEAR-singular matrix is now accepted and
+    // yields a large-but-finite inverse. That is the IEEE-correct answer, and a
+    // caller needing a conditioning guarantee should test determinant() itself.
+    // Over-rejecting a valid transform is the worse failure, because it is
+    // silent.
 
     for (int col = 0; col < 4; ++col) {
         int pivot = -1;
         Scalar best = Scalar(0);
         for (int r = col; r < 4; ++r) {
             const Scalar ratio = std::fabs(lhs[r][col]) / rowScale[r];
+            // A NaN ratio compares false and simply never wins, leaving
+            // pivot == -1 if every candidate is NaN.
             if (ratio > best) {
                 best = ratio;
                 pivot = r;
             }
         }
 
-        // Singular to working precision. Reject rather than produce inf/NaN.
-        if (pivot < 0 || best <= kPivotTolerance) return false;
+        // Rank-deficient in this column: no non-zero candidate remains.
+        if (pivot < 0) return false;
+        if (lhs[pivot][col] == Scalar(0) || !std::isfinite(lhs[pivot][col])) return false;
 
         if (pivot != col) {
             for (int c = 0; c < 4; ++c) {

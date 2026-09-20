@@ -142,6 +142,33 @@ TEST(AABBRayProperty, WideningIsConservativeAndNeverRemovesAHit) {
     }
 }
 
+TEST(AABBRayProperty, AReportedHitEntersAtOrBeforeTheBoxSurface) {
+    // The sampled-point test above proves soundness only (never a false miss).
+    // This is the other direction: when a hit IS reported with tEnter > tMin,
+    // the ray must actually reach the box at that distance. Checked against a
+    // box grown by the widening tolerance, since the test is conservative by
+    // construction and may report entry fractionally early.
+    RandomGeometry gen(kSeed + 5);
+    int checked = 0;
+    for (int i = 0; i < 5000; ++i) {
+        const AABB box = gen.box(Scalar(5));
+        if (box.isEmpty()) continue;
+        const Ray ray(gen.point(Scalar(10)), gen.direction(), Scalar(0), Scalar(30));
+        Scalar tEnter = -1.0f;
+        if (!intersectRay(box, ray, &tEnter)) continue;
+        if (tEnter <= ray.tMin) continue;  // originated inside; nothing to check
+
+        // Slack proportional to the box size, covering both the deliberate
+        // widening and ordinary rounding in computing the entry point.
+        const Scalar slack = maxComponent(box.diagonal()) * Scalar(1e-3) + Scalar(1e-4);
+        const AABB grown(box.min - Vec3(slack), box.max + Vec3(slack));
+        ASSERT_TRUE(grown.contains(ray.at(tEnter)))
+            << "reported entry at t=" << tEnter << " is outside the box on ray " << i;
+        ++checked;
+    }
+    EXPECT_GT(checked, 100) << "sample found too few surface entries to be meaningful";
+}
+
 TEST(AABBRayProperty, ReportedEntryDistanceLiesWithinTheRayRange) {
     RandomGeometry gen(kSeed + 2);
     for (int i = 0; i < 5000; ++i) {

@@ -93,12 +93,16 @@ Scalar determinant(const Mat4& a);
 // inverse is used to bring rays into object space, where error becomes a
 // wrong intersection rather than a slightly wrong pixel.
 //
-// Returns false and leaves `out` untouched when the matrix is singular to within
-// the pivot tolerance. That tolerance is applied to each pivot RELATIVE TO ITS
-// OWN ROW, which is scale-invariant: an absolute threshold would reject a
-// uniformly tiny but perfectly invertible matrix, and a whole-matrix threshold
-// fails specifically on homogeneous transforms, where m[3][3] == 1 dwarfs a
-// small linear part. See the implementation for the full argument.
+// Returns false and leaves `out` untouched when the matrix is SINGULAR, meaning
+// elimination reaches an exactly-zero pivot. A near-singular matrix is accepted
+// and yields a large-but-finite inverse; test determinant() if you need a
+// conditioning guarantee.
+//
+// There is deliberately no magnitude-based tolerance. A homogeneous transform
+// mixes units -- a dimensionless linear block beside a translation column in
+// length units -- so there is no scale to compare a pivot against. Every
+// threshold tried rejected some perfectly invertible transform; see the
+// implementation for the three that were tried and how each failed.
 bool invert(const Mat4& a, Mat4& out);
 
 // Convenience wrapper: asserts invertibility in debug, returns identity for a
