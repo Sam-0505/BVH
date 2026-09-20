@@ -1,0 +1,22 @@
+# Build output
+build/
+out/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+_deps/
+
+# Compiled shaders
+*.spv
+
+# IDE / editor
+.vscode/
+.idea/
+*.xcodeproj/
+compile_commands.json
+
+# macOS
+.DS_Store
+
+# Local agent state (keep .claude/agents and CLAUDE.md tracked)
+.claude/settings.local.json
