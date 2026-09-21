@@ -8,16 +8,10 @@
 
 namespace geom {
 
-// 4x4 matrix in COLUMN-MAJOR storage: m[c][r] is column c, row r.
+// COLUMN-MAJOR: m[c][r] is column c, row r. Matches GLSL/SPIR-V, so a Mat4
+// memcpy's into a uniform buffer with no transpose.
 //
-// Column-major is chosen to match GLSL/SPIR-V, so a Mat4 can be memcpy'd into a
-// uniform buffer and consumed by a Vulkan shader with no transpose. The cost is
-// that the in-memory order does not match how a matrix is written on paper, so
-// every access site has to be clear about which index is which -- hence m[c][r]
-// everywhere rather than a flat array.
-//
-// Convention: column vectors, so a transform is applied as M * v, and composing
-// "first A, then B" is B * A.
+// Column vectors: apply as M * v, and "first A, then B" composes as B * A.
 struct Mat4 {
     // m[column][row]
     Scalar m[4][4]{};
@@ -68,9 +62,8 @@ struct Mat4 {
 Mat4 translation(const Vec3& t);
 Mat4 scaling(const Vec3& s);
 
-// Right-handed rotation by `angle` radians about a (not necessarily unit) axis,
-// via Rodrigues' rotation formula. A zero-length axis yields the identity rather
-// than NaN.
+// Right-handed, Rodrigues' formula, axis need not be unit. A zero-length axis
+// gives the identity rather than NaN.
 Mat4 rotation(const Vec3& axis, Scalar angle);
 
 Mat4 rotationX(Scalar angle);
@@ -85,29 +78,18 @@ Vec4 operator*(const Mat4& a, const Vec4& v);
 Mat4 transpose(const Mat4& a);
 Scalar determinant(const Mat4& a);
 
-// Inverse via Gauss-Jordan elimination with SCALED partial pivoting.
+// Gauss-Jordan with SCALED partial pivoting. Cofactor expansion would be faster
+// for a fixed 4x4 but less stable, and this is not a hot path -- while the
+// error lands on object-space rays, where it becomes a wrong intersection.
 //
-// Cofactor expansion is the usual choice for a fixed 4x4 and is faster, but it is
-// less numerically stable and this is not a hot path -- transforms are built once
-// per frame at most, not once per ray. Stability matters more here because the
-// inverse is used to bring rays into object space, where error becomes a
-// wrong intersection rather than a slightly wrong pixel.
+// Returns false only when elimination hits an exactly-zero pivot. A NEAR-
+// singular matrix is accepted and gives a large-but-finite inverse; measured,
+// that admits ~88% of degeneracies produced by arithmetic. Test determinant()
+// if you need a conditioning guarantee.
 //
-// Returns false and leaves `out` untouched when the matrix is SINGULAR, meaning
-// elimination reaches an exactly-zero pivot.
-//
-// A near-singular matrix is ACCEPTED and yields a large-but-finite inverse, and
-// this is a weak guarantee in practice: for degeneracy that arises from
-// arithmetic rather than from an exact pattern, the pivot lands near zero
-// rather than on it, and measurement puts the acceptance rate at roughly 88%.
-// Test determinant() if you need a conditioning guarantee. The implementation
-// explains why no magnitude threshold was used instead.
-//
-// There is deliberately no magnitude-based tolerance. A homogeneous transform
-// mixes units -- a dimensionless linear block beside a translation column in
-// length units -- so there is no scale to compare a pivot against. Every
-// threshold tried rejected some perfectly invertible transform; see the
-// implementation for the three that were tried and how each failed.
+// No magnitude tolerance, deliberately: a homogeneous transform mixes units, so
+// there is no scale to compare a pivot against. The implementation records the
+// three thresholds tried and what each one wrongly rejected.
 bool invert(const Mat4& a, Mat4& out);
 
 // Convenience wrapper: asserts invertibility in debug, returns identity for a
@@ -116,36 +98,23 @@ Mat4 inverse(const Mat4& a);
 
 // --- Applying transforms -----------------------------------------------------
 
-// Transform a POSITION: w = 1, so translation applies. Performs the perspective
-// divide when the resulting w is not 1, which makes this correct for projection
-// matrices as well as affine ones.
-//
-// Three cases, not two: w == 1 skips the divide (the affine fast path), w == 0
-// also skips it and returns the raw xyz. A point that projects to w == 0 lies
-// on the eye plane and has no finite projected position, so there is no correct
-// answer to return; the raw direction-like vector is at least finite, where
-// dividing would give infinities or NaN.
+// POSITION: w = 1, so translation applies, with a perspective divide when w
+// comes back as anything else. Three cases, not two -- w == 0 also skips the
+// divide and returns raw xyz, since a point on the eye plane has no finite
+// projection and infinities would be worse than a finite wrong answer.
 Vec3 transformPoint(const Mat4& a, const Vec3& p);
 
-// Transform a DIRECTION: w = 0, so translation does not apply. Length is NOT
-// preserved under scaling -- that is deliberate, because a ray direction must
-// scale with the transform for its t values to stay meaningful.
+// DIRECTION: w = 0, no translation. Length is not preserved under scaling, by
+// design -- a ray direction must scale for its t values to stay meaningful.
 Vec3 transformVector(const Mat4& a, const Vec3& v);
 
-// Transform a NORMAL using the inverse transpose of the upper-left 3x3.
+// NORMAL: inverse transpose of the upper-left 3x3. A normal is a covector, so
+// under non-uniform scale it does not transform like a direction -- using
+// transformVector is the classic bug that leaves normals off-perpendicular.
 //
-// A normal is a covector: under a non-uniform scale it does not transform like a
-// direction. Scaling x by 2 halves the x component of a surface normal rather
-// than doubling it, so using transformVector here is the classic bug that leaves
-// normals non-perpendicular to their surface.
-//
-// Takes the ALREADY-INVERTED matrix so callers transforming many normals do not
-// pay for a matrix inverse each time.
-//
-// THE RESULT IS NOT UNIT LENGTH, even for a unit input: the inverse transpose
-// preserves perpendicularity, not magnitude. A unit normal through the inverse
-// of a uniform 4x scale comes back with length 1/4. Normalize the result if you
-// need a unit normal; shading does, a sidedness test does not.
+// Takes the already-inverted matrix, so a caller transforming many normals
+// inverts once. The result is NOT unit length: perpendicularity is preserved,
+// magnitude is not.
 Vec3 transformNormalWithInverse(const Mat4& inverseTransform, const Vec3& n);
 
 inline bool nearlyEqual(const Mat4& a, const Mat4& b, Scalar tol = kEpsilon) {

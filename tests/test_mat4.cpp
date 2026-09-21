@@ -27,8 +27,7 @@ TEST(Mat4, IdentityIsMultiplicativeIdentity) {
 }
 
 TEST(Mat4, ColumnMajorStorageLayout) {
-    // Pins down the storage convention the Vulkan upload path depends on:
-    // translation lives in the fourth COLUMN, i.e. m[3][0..2].
+    // Translation lives in the fourth COLUMN -- what the Vulkan upload needs.
     const Mat4 t = translation(Vec3(7.0f, 8.0f, 9.0f));
     EXPECT_FLOAT_EQ(t.m[3][0], 7.0f);
     EXPECT_FLOAT_EQ(t.m[3][1], 8.0f);
@@ -157,12 +156,8 @@ TEST(Mat4, InvertRejectsSingularMatrix) {
 }
 
 TEST(Mat4, NormalTransformUnderNonUniformScale) {
-    // The classic bug this guards against: under non-uniform scale a normal does
-    // NOT transform like a direction. Take a plane spanned by X and Z with
-    // normal +Y, then scale Y by 2. The surface flattens relative to Y, so the
-    // correct transformed normal still points along +Y -- but transformVector
-    // would scale it by 2 in Y, which happens to keep the direction here, so use
-    // a tilted normal where the two answers genuinely differ.
+    // Under non-uniform scale a normal does not transform like a direction.
+    // Uses a tilted normal, where the two answers genuinely differ.
     const Mat4 s = scaling(Vec3(2.0f, 1.0f, 1.0f));
     const Mat4 sInv = inverse(s);
 
@@ -210,9 +205,7 @@ TEST(Mat4, MatrixVectorMultiplyMatchesManualExpansion) {
 }
 
 TEST(Mat4, FromColumnsMatchesStorageOrder) {
-    // fromColumns had no coverage at all. It is the constructor that most
-    // directly encodes the column-major convention, so getting it wrong would
-    // silently transpose every matrix built through it.
+    // Getting this wrong would silently transpose every matrix built with it.
     const Vec4 c0(1.0f, 2.0f, 3.0f, 4.0f);
     const Vec4 c1(5.0f, 6.0f, 7.0f, 8.0f);
     const Vec4 c2(9.0f, 10.0f, 11.0f, 12.0f);
@@ -240,13 +233,9 @@ TEST(Mat4, FromColumnsCanRebuildIdentity) {
 }
 
 TEST(Mat4, InvertHandlesSmallObjectsFarFromTheOrigin) {
-    // A millimetre-scale part 10 km from the origin: linear part 1e-4,
-    // translation 1e4. An ordinary CAD/scene transform, not a pathological one.
-    //
-    // This is the case that a row-relative pivot tolerance rejects: row 0 is
-    // (1e-4, 0, 0, 1e4), so the pivot ratio is 1e-8, below any epsilon-based
-    // cutoff -- even though the matrix inverts exactly. The failure is silent,
-    // because inverse() returns identity in a release build.
+    // A millimetre part 10 km out. Row 0 is (1e-4, 0, 0, 1e4), so a
+    // row-relative pivot tolerance rejects it at a ratio of 1e-8 -- silently,
+    // since inverse() returns identity in release.
     const Mat4 m = translation(Vec3(1e4f, 1e4f, 1e4f)) * scaling(Vec3(1e-4f, 1e-4f, 1e-4f));
     Mat4 inv;
     ASSERT_TRUE(invert(m, inv));
@@ -254,14 +243,9 @@ TEST(Mat4, InvertHandlesSmallObjectsFarFromTheOrigin) {
 }
 
 TEST(Mat4, InvertHandlesWideRangesOfScaleAndTranslation) {
-    // The same hazard swept across several decades. A row-scaled tolerance
-    // rejected the last three outright.
-    //
-    // Correctness is checked against the ANALYTIC inverse rather than by
-    // round-tripping a point. For M = T(t) * S(s) the inverse is exactly
-    // S(1/s) * T(-t), so this tests the elimination directly, without
-    // conflating it with the precision limits of the forward transform (see
-    // the next test).
+    // Checked against the analytic inverse S(1/s) * T(-t) rather than by
+    // round-tripping a point, which would conflate the elimination with the
+    // precision limit of the forward transform -- see the next test.
     const std::pair<Scalar, Scalar> cases[] = {
         {1e-2f, 1e2f}, {1e-3f, 1e3f}, {1e-4f, 1e4f}, {1e-6f, 1e6f}, {1e-3f, 1e6f},
     };
@@ -280,17 +264,10 @@ TEST(Mat4, InvertHandlesWideRangesOfScaleAndTranslation) {
 }
 
 TEST(Mat4, RoundTripPrecisionIsLimitedByScaleToTranslationRatio) {
-    // Documents a real limit of float32, not a defect in invert().
-    //
-    // Transforming a unit-scale point by S(s) then T(t) makes its contribution
-    // s while the coordinate sits at t. Once s/t falls below the float epsilon
-    // (~1.2e-7) that contribution is below one ULP at t and is destroyed by
-    // the FORWARD transform. No inverse can recover it -- the information is
-    // already gone.
-    //
-    // This is why the test above compares against the analytic inverse, and
-    // why Phase 2 should keep scene geometry near the origin rather than
-    // relying on large world offsets.
+    // A float32 limit, not a defect in invert(). Scaling a unit point by s and
+    // translating by t puts its contribution below one ULP at t once s/t drops
+    // under the epsilon, so the FORWARD transform destroys it. Keep scene
+    // geometry near the origin rather than relying on large world offsets.
     const Vec3 p(0.3f, -0.7f, 0.5f);
 
     // Ratio 1e-4: comfortably inside float precision, round-trip is accurate.

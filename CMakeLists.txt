@@ -85,13 +85,15 @@ endif()
 # fast-math permits the compiler to assume those never occur, which turns the
 # NaN-tolerant slab test into a source of wrong answers rather than a speedup.
 
-# Carried on the shared options target so every translation unit agrees -- a
-# header-inline function compiled with different values in different TUs would
-# be an ODR violation.
+# Kept on its own target, separate from warnings and sanitizers, because it is
+# ODR-critical: intersectRay is inline, so two TUs compiled with different
+# values are a silent violation. Every library links this PUBLIC, so the
+# guarantee is local to each target rather than inherited from a neighbour.
+add_library(bvh_config INTERFACE)
 if(BVH_CONSERVATIVE_RAY_BOX)
-    target_compile_definitions(bvh_project_options INTERFACE BVH_CONSERVATIVE_RAY_BOX=1)
+    target_compile_definitions(bvh_config INTERFACE BVH_CONSERVATIVE_RAY_BOX=1)
 else()
-    target_compile_definitions(bvh_project_options INTERFACE BVH_CONSERVATIVE_RAY_BOX=0)
+    target_compile_definitions(bvh_config INTERFACE BVH_CONSERVATIVE_RAY_BOX=0)
 endif()
 
 if(BVH_ENABLE_SANITIZERS)
@@ -112,6 +114,7 @@ endif()
 add_library(bvh_geometry STATIC
     src/geometry/mat4.cpp
     src/geometry/mesh.cpp
+    src/geometry/mesh_query.cpp
 )
 
 target_include_directories(bvh_geometry PUBLIC
@@ -122,9 +125,52 @@ target_include_directories(bvh_geometry PUBLIC
 # PUBLIC so consumers get the warning settings too -- a mistake in a test is
 # caught the same way as one in the library. BUILD_INTERFACE keeps the options
 # out of any installed package config.
-target_link_libraries(bvh_geometry PUBLIC $<BUILD_INTERFACE:bvh_project_options>)
+target_link_libraries(bvh_geometry PUBLIC bvh_config $<BUILD_INTERFACE:bvh_project_options>)
 
 add_library(bvh::geometry ALIAS bvh_geometry)
+
+# ---------------------------------------------------------------------------
+# BVH
+#
+# Depends on the geometry core and nothing else -- no Vulkan, no windowing, no
+# file I/O -- so construction and traversal stay unit-testable on their own.
+# ---------------------------------------------------------------------------
+
+add_library(bvh_bvh STATIC
+    src/bvh/bvh.cpp
+)
+
+target_include_directories(bvh_bvh PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(bvh_bvh
+    PUBLIC bvh_geometry bvh_config
+    PRIVATE $<BUILD_INTERFACE:bvh_project_options>)
+
+add_library(bvh::bvh ALIAS bvh_bvh)
+
+# ---------------------------------------------------------------------------
+# Scene I/O
+#
+# Separate from the geometry core: it touches the filesystem and untrusted
+# input, so keeping it out means the core stays testable with no files on disk.
+# ---------------------------------------------------------------------------
+
+add_library(bvh_scene STATIC
+    src/scene/obj_loader.cpp
+    src/scene/procedural.cpp
+)
+
+target_include_directories(bvh_scene PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(bvh_scene
+    PUBLIC bvh_geometry bvh_config
+    PRIVATE $<BUILD_INTERFACE:bvh_project_options>)
+
+add_library(bvh::scene ALIAS bvh_scene)
 
 # ---------------------------------------------------------------------------
 # Tests

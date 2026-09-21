@@ -1,14 +1,6 @@
-// Death tests for the library's assert-guarded preconditions.
-//
-// The project's error policy is: the Mesh constructor THROWS, because that is
-// the trust boundary where untrusted file data enters; everywhere else a
-// violated precondition is a programming error and ASSERTS. The throwing half
-// is covered in test_mesh.cpp. This file covers the asserting half.
-//
-// These only exist in a build with assertions enabled. Release defines NDEBUG,
-// which compiles every assert away -- so if this file were not guarded, the
-// tests would "pass" in Release by doing nothing, which is worse than not
-// having them. Run the Debug configuration to exercise them.
+// The asserting half of the error policy (the throwing half is in
+// test_mesh.cpp). Guarded on NDEBUG: without it these would vacuously "pass"
+// in Release, which is worse than not having them. Run Debug to exercise.
 
 #include <gtest/gtest.h>
 
@@ -69,17 +61,12 @@ TEST(PreconditionDeathTest, Vec3IndexOutOfRange) {
 
 #endif  // NDEBUG
 
-// --- Release-safe behaviour that must hold in EVERY build --------------------
-//
-// These are the release-build counterparts of the asserts above: with NDEBUG
-// the precondition check is gone, so the operation must still be free of
-// undefined behaviour even though its result is meaningless.
+// Release counterparts: with the assert compiled out, the operation must still
+// be free of UB even though its result is meaningless.
 
 TEST(Precondition, NormalizeZeroVectorIsNotUndefinedBehaviour) {
-    // The assert is the debug guard; operator/ must still avoid a literal
-    // division by zero, which is UB per [expr.mul]/4 regardless of NDEBUG.
-    // Verified under UBSan. In Debug this test is unreachable because the
-    // assert above fires first, so it only asserts anything in Release.
+    // operator/ must still avoid the literal divide-by-zero that [expr.mul]/4
+    // leaves undefined, with or without NDEBUG.
 #ifdef NDEBUG
     const Vec3 n = normalize(Vec3(0.0f));
     // Every component is 0/0 == NaN. The point is that it is a NaN and not UB.

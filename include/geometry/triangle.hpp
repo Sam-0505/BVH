@@ -8,17 +8,9 @@
 
 namespace geom {
 
-// A triangle stored as three explicit vertices.
-//
-// This is the "fat" representation: 36 bytes of position data with no indirection.
-// The Mesh class stores indexed vertices instead (shared vertices stored once),
-// and materialises a Triangle on demand. That split is intentional -- indexed
-// storage is the compact form for holding a mesh, while the unpacked form is
-// what an intersection routine wants, since chasing indices during traversal
-// costs an extra dependent memory access per test.
-//
-// Winding is counter-clockwise when viewed from the front face, which puts the
-// normal along cross(v1 - v0, v2 - v0) by the right-hand rule.
+// Three explicit vertices -- the unpacked form an intersection routine wants.
+// Mesh stores the indexed form and materialises these on demand.
+// Winding is CCW from the front, so the normal is cross(v1-v0, v2-v0).
 struct Triangle {
     Vec3 v0{};
     Vec3 v1{};
@@ -30,37 +22,17 @@ struct Triangle {
     constexpr Vec3 edge01() const { return v1 - v0; }
     constexpr Vec3 edge02() const { return v2 - v0; }
 
-    // Unnormalised geometric normal. Its magnitude is twice the triangle area,
-    // which is why area() below reuses it rather than computing separately.
-    // Returned unnormalised so callers that only need an orientation test (a
-    // sign) can skip the sqrt.
+    // Magnitude is twice the area. Unnormalised so a sign test can skip the sqrt.
     constexpr Vec3 normalUnnormalized() const { return cross(edge01(), edge02()); }
 
-    // Unit normal, or the zero vector for a degenerate triangle. Degenerate
-    // input is real -- exported meshes routinely contain zero-area triangles
-    // from welded or duplicated vertices -- so this must not return NaN.
+    // Zero vector for a degenerate triangle, never NaN.
     Vec3 normal() const { return normalizeSafe(normalUnnormalized()); }
 
     Scalar area() const { return Scalar(0.5) * length(normalUnnormalized()); }
 
-    // A triangle is degenerate when its vertices are collinear (or coincident),
-    // giving it zero area and no well-defined normal. Such triangles cannot be
-    // hit by a ray in any meaningful sense, but they still have valid bounds and
-    // a valid centroid, so a BVH can carry them without special-casing -- they
-    // simply never report a hit.
-    //
-    // The test is DIMENSIONLESS, comparing a shape ratio rather than an absolute
-    // area. Writing it as `area <= tol` would make it scale-dependent: with an
-    // absolute tolerance of 1e-6, a perfectly healthy triangle with 1e-3 edges
-    // has area 5e-7 and would be flagged, and a unit-scale mesh of a million
-    // triangles has a mean triangle area near 6e-6 -- right at the threshold.
-    // A degeneracy predicate that fires on a tenth of a valid mesh is worse
-    // than none.
-    //
-    // Instead compare |cross| against tol * L^2, where L is the longest edge.
-    // Since |cross| == 2 * area == L * h for the height h above that edge, this
-    // is h/L <= tol -- a pure aspect ratio, invariant under uniform scaling.
-    // Squared on both sides to avoid a sqrt.
+    // Dimensionless on purpose: |cross| <= tol * L^2 for the longest edge L is
+    // h/L <= tol, an aspect ratio invariant under scaling. An absolute area
+    // threshold would flag healthy small triangles -- 1e-3 edges give 5e-7 area.
     bool isDegenerate(Scalar tol = kEpsilon) const {
         const Scalar longestEdgeSq =
             std::fmax(lengthSquared(edge01()),
@@ -71,8 +43,7 @@ struct Triangle {
         return lengthSquared(normalUnnormalized()) <= limit * limit;
     }
 
-    // Tight axis-aligned bounds. Exact: the extremes of a triangle are always
-    // at its vertices, so no sampling or refinement is needed.
+    // Exact -- a triangle's extremes are always at its vertices.
     AABB bounds() const {
         AABB b;
         b.extend(v0);
@@ -81,9 +52,8 @@ struct Triangle {
         return b;
     }
 
-    // Centroid (barycentre). BVH construction partitions on centroids rather
-    // than on bounds, because a centroid gives each primitive exactly one
-    // position to sort by, whereas overlapping bounds do not induce an ordering.
+    // BVH construction partitions on centroids: one position per primitive to
+    // sort by, where overlapping bounds give no ordering.
     constexpr Vec3 centroid() const {
         return (v0 + v1 + v2) * (Scalar(1) / Scalar(3));
     }

@@ -13,6 +13,17 @@ Mesh::Mesh(std::vector<Vec3> positions, std::vector<std::uint32_t> indices)
     }
     // Validate once at the boundary so traversal can index without bounds checks.
     // O(n) here buys us an unchecked inner loop for the lifetime of the mesh.
+    // A NaN coordinate is silently dropped by the fmin/fmax in extend(), so the
+    // mesh would bound geometry it does not contain, and a NaN split key makes
+    // std::nth_element's comparator not a strict weak ordering. Both are caught
+    // here rather than downstream.
+    for (std::size_t i = 0; i < positions_.size(); ++i) {
+        if (!isFinite(positions_[i])) {
+            throw std::invalid_argument("Mesh: vertex " + std::to_string(i) +
+                                        " is not finite");
+        }
+    }
+
     for (std::size_t i = 0; i < indices_.size(); ++i) {
         // Widen the index rather than narrowing the count: narrowing would wrap
         // for a vertex buffer larger than 2^32 and silently accept bad indices.
@@ -45,6 +56,7 @@ std::size_t Mesh::countDegenerateTriangles(Scalar tol) const {
 void Mesh::transform(const Mat4& xf) {
     for (Vec3& p : positions_) p = transformPoint(xf, p);
     recomputeBounds();
+    ++revision_;
 }
 
 }  // namespace geom

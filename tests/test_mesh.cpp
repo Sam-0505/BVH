@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "geometry/mesh.hpp"
@@ -165,4 +167,50 @@ TEST(Mesh, TransformWithNonAffineMatrixAppliesPerspectiveDivide) {
 
     // Bounds must have been refreshed against the transformed positions.
     EXPECT_TRUE(nearlyEqual(m.bounds().max, Vec3(2.0f / 3.0f, 3.0f, 0.0f), 1e-5f));
+}
+
+// A NaN coordinate is silently dropped by the fmin/fmax in extend(), so a mesh
+// carrying one would bound geometry it does not contain -- and validate() on a
+// BVH built over it would still pass. It also makes the BVH's split comparator
+// not a strict weak ordering, which std::nth_element requires. Rejected here,
+// at the boundary, so everything downstream can assume finiteness.
+TEST(Mesh, RejectsNonFiniteVertices) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {nan, 1, 0}}, {0, 1, 2}), std::invalid_argument);
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {0, nan, 0}}, {0, 1, 2}), std::invalid_argument);
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {0, 0, nan}}, {0, 1, 2}), std::invalid_argument);
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {inf, 1, 0}}, {0, 1, 2}), std::invalid_argument);
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {-inf, 1, 0}}, {0, 1, 2}), std::invalid_argument);
+}
+
+TEST(Mesh, RejectsANonFiniteVertexEvenWhenNoTriangleUsesIt) {
+    // Unreferenced today, but transform() or a later index edit could reach it.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_THROW(Mesh({{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {nan, nan, nan}}, {0, 1, 2}),
+                 std::invalid_argument);
+}
+
+TEST(Mesh, ErrorMessageNamesTheOffendingVertex) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    try {
+        Mesh({{0, 0, 0}, {1, 0, 0}, {nan, 1, 0}}, {0, 1, 2});
+        FAIL() << "expected a throw";
+    } catch (const std::invalid_argument& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("vertex 2"), std::string::npos) << msg;
+    }
+}
+
+TEST(Mesh, RevisionChangesOnlyWhenTheGeometryDoes) {
+    Mesh m = unitCube();
+    const std::uint64_t before = m.revision();
+    // Reading must not bump it.
+    (void)m.bounds();
+    (void)m.triangle(0);
+    EXPECT_EQ(m.revision(), before);
+
+    m.transform(translation(Vec3(1.0f, 0.0f, 0.0f)));
+    EXPECT_NE(m.revision(), before);
 }

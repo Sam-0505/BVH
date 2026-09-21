@@ -25,9 +25,7 @@ Mat4 scaling(const Vec3& s) {
 }
 
 Mat4 rotation(const Vec3& axis, Scalar angle) {
-    // Rodrigues' rotation formula in matrix form:
-    //   R = I cos(t) + [k]_x sin(t) + k k^T (1 - cos(t))
-    // where k is the unit axis and [k]_x its cross-product matrix.
+    // Rodrigues: R = I cos(t) + [k]_x sin(t) + k k^T (1 - cos(t)).
     const Vec3 k = normalizeSafe(axis);
     if (k == Vec3(Scalar(0))) return Mat4::identity();  // degenerate axis
 
@@ -84,8 +82,7 @@ Mat4 transpose(const Mat4& a) {
 }
 
 Scalar determinant(const Mat4& a) {
-    // Laplace expansion using 2x2 minors of the top two rows paired with the
-    // bottom two. Only used for reporting/validation, not in a hot path.
+    // Laplace expansion on 2x2 minors. Reporting only, not a hot path.
     const Scalar s0 = a.m[0][0] * a.m[1][1] - a.m[1][0] * a.m[0][1];
     const Scalar s1 = a.m[0][0] * a.m[2][1] - a.m[2][0] * a.m[0][1];
     const Scalar s2 = a.m[0][0] * a.m[3][1] - a.m[3][0] * a.m[0][1];
@@ -104,11 +101,8 @@ Scalar determinant(const Mat4& a) {
 }
 
 bool invert(const Mat4& a, Mat4& out) {
-    // Gauss-Jordan on the augmented system [A | I], with partial pivoting.
-    //
-    // Indices below are [row][col] on local working copies -- the transpose of
-    // our storage order -- because elimination is naturally row-oriented. We
-    // transpose in and out rather than contort the algorithm.
+    // Gauss-Jordan on [A | I]. Local copies are [row][col] -- the transpose of
+    // our storage -- because elimination is naturally row-oriented.
     Scalar lhs[4][4];
     Scalar rhs[4][4]{};
     Scalar rowScale[4];
@@ -124,57 +118,23 @@ bool invert(const Mat4& a, Mat4& out) {
         rhs[r][r] = Scalar(1);
     }
 
-    // SELECTING the pivot and DETECTING singularity are two different questions,
-    // and conflating them is a trap. What follows keeps them apart.
+    // Pivot SELECTION and singularity DETECTION are separate questions here.
     //
-    // SELECTION uses scaled ("implicit") partial pivoting: each candidate is
-    // judged relative to the largest entry in its own row. This is the textbook
-    // choice and it is what keeps elimination stable when rows are scaled
-    // differently -- with raw magnitudes, multiplying one equation through by
-    // 1e6 wins it every pivot contest without making it better conditioned.
+    // Selection uses the scaled ratio, which keeps elimination stable when rows
+    // are scaled differently. Detection rejects only an exactly-zero pivot,
+    // because a homogeneous transform has no single scale to threshold against:
+    // absolute (1e-20) rejects scaling(1e-21); whole-matrix rejects it too,
+    // since m[3][3] == 1 dominates; row-relative rejects translation(1e4) *
+    // scaling(1e-4), an ordinary CAD transform, because row 0 mixes a 1e-4
+    // linear part with a 1e4 translation.
     //
-    // DETECTION rejects only an exactly-zero pivot. Every magnitude-based
-    // tolerance tried here was wrong, because a homogeneous transform has no
-    // single scale to measure against:
-    //
-    //   - An ABSOLUTE threshold (1e-20) rejects scaling(1e-21), which inverts
-    //     exactly.
-    //   - A WHOLE-MATRIX threshold rejects it too: m[3][3] == 1 dominates, so
-    //     every pivot that matters looks negligible beside it.
-    //   - A ROW-RELATIVE threshold rejects translation(1e4) * scaling(1e-4) --
-    //     a millimetre-scale part 10 km from the origin, an ordinary CAD
-    //     transform. Row 0 is (1e-4, 0, 0, 1e4), so the ratio is 1e-8, under
-    //     any epsilon-based cutoff. The linear part and the translation column
-    //     are in different units; comparing them is meaningless.
-    //
-    // That last one is the worst failure of the three, because invert() returns
-    // false, inverse() then returns identity in a release build, and rays for
-    // that object are silently transformed into the wrong space.
-    //
-    // What the exact-zero rule does and does not catch, measured rather than
-    // assumed:
-    //
-    //   - EXACTLY REPRESENTABLE degeneracy is still caught, because elimination
-    //     drives it to a true zero. Verified against a zero matrix, a zero
-    //     scale axis at 1e-21 / 1 / 1e21, duplicate rows, and a row that is a
-    //     literal sum of two others.
-    //   - DEGENERACY PRODUCED BY ARITHMETIC is NOT caught. When row 3 is a
-    //     random linear combination of rows 0 and 1, the products and the sum
-    //     round, so elimination lands on a tiny non-zero pivot instead of a
-    //     zero. Over 200,000 such matrices this rule accepts 175,488 of them
-    //     (87.7%) with |M*M^-1 - I| > 1e-2, worst residual 1.3e+05.
-    //
-    // So this gives up most near-singular detection, and that is a deliberate
-    // trade, not an oversight. The row-relative threshold caught far more of
-    // them, but bought that only by rejecting valid transforms such as
-    // translation(1e4) * scaling(1e-4) -- and over-rejection fails SILENTLY,
-    // because inverse() then returns identity in a release build. Accepting a
-    // near-singular matrix instead returns the IEEE-correct large-but-finite
-    // inverse, which a caller can detect by testing determinant().
-    //
-    // The right place for a real conditioning check is the boundary where
-    // transforms are accepted from a user or a scene file, rejected once with
-    // a clear message. Nothing in the current code inverts user-supplied data.
+    // The cost, measured: exactly representable degeneracy is still caught, but
+    // degeneracy produced by arithmetic lands on a tiny non-zero pivot and is
+    // accepted -- 175,488 of 200,000 random cases, worst residual 1.3e+05. That
+    // is the better trade, since over-rejection fails silently (inverse()
+    // returns identity in release) while a large inverse is detectable via
+    // determinant(). A real conditioning check belongs where transforms are
+    // accepted from a user; nothing here inverts user-supplied data.
 
     for (int col = 0; col < 4; ++col) {
         int pivot = -1;
@@ -234,8 +194,7 @@ Mat4 inverse(const Mat4& a) {
 
 Vec3 transformPoint(const Mat4& a, const Vec3& p) {
     const Vec4 r = a * Vec4(p, Scalar(1));
-    // Affine transforms leave w == 1 and skip the divide; projection matrices
-    // do not, so handle both rather than silently producing wrong results.
+    // Affine leaves w == 1 and skips the divide; projections do not.
     if (r.w != Scalar(1) && r.w != Scalar(0)) {
         const Scalar invW = Scalar(1) / r.w;
         return {r.x * invW, r.y * invW, r.z * invW};
@@ -249,8 +208,8 @@ Vec3 transformVector(const Mat4& a, const Vec3& v) {
 }
 
 Vec3 transformNormalWithInverse(const Mat4& inverseTransform, const Vec3& n) {
-    // n' = (M^-1)^T * n, restricted to the upper-left 3x3. Expanded here as a
-    // transposed multiply so we never materialise the transpose.
+    // n' = (M^-1)^T * n on the upper-left 3x3, as a transposed multiply so the
+    // transpose is never materialised.
     const Mat4& i = inverseTransform;
     return {i.m[0][0] * n.x + i.m[0][1] * n.y + i.m[0][2] * n.z,
             i.m[1][0] * n.x + i.m[1][1] * n.y + i.m[1][2] * n.z,

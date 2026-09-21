@@ -12,11 +12,16 @@ claim is presented as *reasoning* and marked `UNVERIFIED`. There are no benchmar
 whose own rule is that a number not recorded there "does not exist and must be written as
 `UNVERIFIED`".
 
-> **One claim in the source violates that rule and needs the Implementation Engineer's attention.**
-> `include/geometry/aabb.hpp:196-198` states that "a sweep of 3 million rays aimed at shared sibling
-> faces found no difference with it removed." That is an empirical result with no file under
-> `benchmarks/results/` behind it, and no committed test runs 3 million rays — the largest is a
-> 20,000-ray property test (`tests/test_aabb_property.cpp:120`). Treated as `UNVERIFIED` throughout.
+> **Resolved in Phase 2b — updated 2026-09-21, working tree past `4a29b52`.** The Phase 1 comment
+> block above `intersectRay` originally carried the unrecorded "3 million rays" claim this callout
+> used to flag. That comment has since been shortened (`include/geometry/aabb.hpp:140-152`) and no
+> longer makes the claim at all — it now points to `kBestPruneSlack` in `src/bvh/bvh.cpp:214-245`,
+> which replaces it with an actual measured table (six pole-ray tessellations from 484 to 1,201,216
+> triangles, each a comment-quoted number) and pins two regressions to it
+> (`tests/test_bvh.cpp:968`, `:1006`). See `docs/bvh.md` §9/§10 for the full story: this is no longer
+> an unverified claim, it is the strongest measured-tradeoff narrative in the project. Nothing else
+> in this file changed, so its own Phase 1 citations below are otherwise still accurate as of
+> `935c354`.
 
 ---
 
@@ -42,7 +47,8 @@ whose own rule is that a number not recorded there "does not exist and must be w
 Appendices: [A — two bugs fixed](#appendix-a--two-bugs-fixed-in-this-milestone) ·
 [B — is this really C++20?](#appendix-b--is-this-really-c20) ·
 [C — what Phase 1 does not contain](#appendix-c--what-phase-1-deliberately-does-not-contain) ·
-[D — changelog](#appendix-d--changelog)
+[D — changelog](#appendix-d--changelog) ·
+[Phase 2a addendum — ray/triangle intersection and the oracle](#phase-2a-addendum--raytriangle-intersection-and-the-brute-force-oracle)
 
 ---
 
@@ -901,14 +907,10 @@ defined. UBSan is clean in both configurations (§15).
 
 ## 13. Known limitations
 
-1. **An unrecorded measurement in a code comment.** `include/geometry/aabb.hpp:196-198` states that
-   "a sweep of 3 million rays aimed at shared sibling faces found no difference with it removed."
-   There is no file under `benchmarks/results/`, and the largest committed sweep is 20,000 rays
-   (`tests/test_aabb_property.cpp:120`). Per `CLAUDE.md`'s absolute rule and
-   `benchmarks/results/README.md:3-5`, this must either be recorded as a result or restated as
-   `UNVERIFIED`. **Needs the Implementation Engineer's input.** Everything else in that comment
-   block — including its own closing instruction not to restate PBRT's rationale as a measured
-   result — is exemplary.
+1. **Superseded — see the note at the top of this document.** The unrecorded "3 million rays"
+   comment this item used to flag is gone from the current source; `kBestPruneSlack`
+   (`src/bvh/bvh.cpp:214-245`, documented in `docs/bvh.md`) replaced it with a measured table instead
+   of removing the claim. Left here rather than deleted so the document's own history stays honest.
 2. **No memory-safety sanitizer coverage on this machine.** `BVH_ENABLE_SANITIZERS` wires up both
    ASan and UBSan (`CMakeLists.txt:97-102`), and UBSan runs clean in Debug and Release. **ASan
    cannot run at all here**: a hello-world built with `-fsanitize=address` exits 139, verified in
@@ -1148,6 +1150,171 @@ can be exercised until the Vulkan SDK is installable on this machine (`CLAUDE.md
 
 ---
 
+## Phase 2a Addendum — Ray/Triangle Intersection and the Brute-Force Oracle
+
+**Added 2026-09-21, working tree past `4a29b52` (nothing below is committed yet).** Two new files:
+`include/geometry/intersect.hpp` (Möller–Trumbore) and `include/geometry/mesh_query.hpp` /
+`src/geometry/mesh_query.cpp` (the O(n) reference query every accelerated path — BVH included — is
+checked against). `docs/scene.md` covers the two files that produce the meshes these run on
+(`include/scene/obj_loader.hpp`, `include/scene/procedural.hpp`); `docs/bvh.md` covers the
+accelerated path itself.
+
+### What problem each one solves
+
+`intersect.hpp` answers "does this ray hit this triangle, and where" — the one primitive test
+everything above it (brute force, BVH leaves) bottoms out in. `mesh_query.hpp` answers "what does
+`closestHit`/`anyHit` mean for a whole mesh," and exists twice: once here as the slow, obviously
+correct oracle, and once in `bvh::BVH` as the fast path that must always agree with it
+(`tests/test_bvh.cpp:398-485` checks exactly that agreement across strategies, leaf sizes and depth
+limits).
+
+### `intersectRayTriangle` — Möller–Trumbore, no determinant epsilon
+
+`include/geometry/intersect.hpp:36-70`. Solves the ray/plane/barycentric system directly by Cramer's
+rule using two cross products and four dot products, so it never builds or stores a plane equation
+— 16 fewer bytes per primitive than a precomputed-plane test, which matters because a leaf's
+triangles are streamed through cache on every traversal, not just built once.
+
+**The interview point: there is no `epsilon` anywhere near `det`.** The textbook version of this
+algorithm often adds `if (fabs(det) < EPSILON) return false;` to reject a ray parallel to the
+triangle's plane. This code tests `det == Scalar(0)` exactly (`:45`) and nothing else — every other
+rejection runs on the *unscaled* numerators `uNum`, `vNum`, `uNum + vNum`, compared against `0` and
+`det` with the sign of `det` folded into which comparison to use (`:56-60`):
+
+```cpp
+if (det > Scalar(0)) {
+    if (uNum < 0 || vNum < 0 || uNum + vNum > det) return false;
+} else {
+    if (uNum > 0 || vNum > 0 || uNum + vNum < det) return false;
+}
+```
+
+Only after every rejection has passed does the code divide (`:62-63`) to produce the reported
+barycentrics `u = uNum/det`, `v = vNum/det`. **Why this is the right design and not a missed
+epsilon:** `det` scales with `|e1| |e2| |dir|` — the product of two edge lengths and the ray
+direction's magnitude. A fixed cutoff like `1e-6` means something different for a triangle 1 unit
+across than for one 1000 units across, so a naive epsilon either falsely rejects large, legitimately
+grazing triangles or falsely accepts small degenerate ones. Comparing unscaled barycentrics against
+`det` (rather than `0` against a fixed threshold) is exactly scale-invariant: multiplying every
+vertex and the ray by the same constant multiplies `det`, `uNum`, `vNum` by that same constant, so
+every inequality above is unaffected. `tests/test_intersect.cpp:122` (`IsScaleInvariant`) is the test
+that would fail if a fixed epsilon crept in. A near-degenerate triangle needs no special case either:
+its `det` is tiny, so almost any `u` or `v` numerator exceeds it and the triangle rejects itself
+without a dedicated check (`tests/test_intersect.cpp:136`, `SliverTriangleDoesNotProduceSpuriousHits`).
+`det == 0` exactly is the one case that *is* tested exactly, and correctly so — it is not "nearly
+parallel," it is "the ray lies in the triangle's plane," where there is either no single intersection
+point or infinitely many, so there is nothing for a barycentric division to compute
+(`tests/test_intersect.cpp:81`, `ParallelRayMisses`).
+
+**Two-sided.** No back-face check: a negative `det` (ray opposing the triangle's winding) simply
+flips which comparisons are used, so a hit from either side reports a valid `(t, u, v)`
+(`tests/test_intersect.cpp:68`, `IsTwoSided`). Culling back faces is a renderer decision, not a
+geometry-core one, and this project's ray queries (visibility, collision, clearance) all want both
+sides.
+
+**Complexity and space.** O(1) per triangle test — 2 crosses, 4 dots, 1 divide, a handful of
+compares, no branches beyond the sign split and the final range check. `TriangleHit` is 12 bytes
+(`t`, `u`, `v`, all `Scalar`) and is returned by value; `position()` is offered two ways
+(`:17`, `:20-22`) — from the ray (`origin + t*dir`) or from the triangle
+(`v0 + u*e01 + v*e02`) — because reconstructing from the triangle is more accurate for a hit far
+down a long ray, where `t*dir` has accumulated more rounding error than a barycentric combination of
+three nearby vertices.
+
+**Numerical assumption inherited from `scalar.hpp`:** IEEE-754 binary32, so `-ffast-math` is
+forbidden project-wide (`CLAUDE.md`, `include/geometry/scalar.hpp:12-13`) — this routine's `det == 0`
+test and NaN-tolerant callers upstream (see `docs/bvh.md` for the slab test) depend on exact
+IEEE comparison semantics, which `-ffast-math` is permitted to violate.
+
+**Alternative considered and not taken:** a watertight variant (Woop et al. 2013), which reorders
+axes and shears the ray so grazing rays at shared edges never fall through a crack between two
+triangles. Not implemented — `UNKNOWN — not yet implemented`, and no comment in the tree claims
+watertightness at the triangle level. The conservative *box* widening in `docs/bvh.md` §3/§9 is a
+related but different watertightness concern, one level up in the tree, not a substitute for this.
+
+**Testing strategy.** `tests/test_intersect.cpp` (304 lines) splits into example-based cases
+(hit/miss/edges/two-sidedness/degenerate/range/scale-invariance/sliver) and four property tests
+(`RayTriangleProperty*`, `:207-303`) that fire a ray at a randomly generated barycentric point inside
+a randomly generated triangle and check the recovered barycentrics, the reconstructed hit point, and
+invariance under vertex-order permutation.
+
+### `mesh_query.hpp` / `mesh_query.cpp` — `MeshHit`, `QueryStats`, and the brute-force oracle
+
+`include/geometry/mesh_query.hpp:15-52`, `src/geometry/mesh_query.cpp`.
+
+**`MeshHit`** (`:15-24`) is `intersectRayTriangle`'s `TriangleHit` plus a `triangleIndex`, with
+`kNoTriangle = SIZE_MAX` as the "no hit" sentinel rather than a separate `bool` — one fewer field to
+keep in sync, and `valid()` is a single comparison.
+
+**`QueryStats`** (`:29-39`) exists so the BVH's speedup claim is well-formed at all: it is shared by
+`bruteForceClosestHit`/`bruteForceAnyHit` and by `BVH::closestHit`/`anyHit`, so "the tree tested M
+triangles where brute force tested N" compares the same counted quantity on both sides rather than
+two different notions of "work." Four counters: `trianglesTested`, `nodesExpanded` (a node popped off
+the traversal stack and actually descended into — brute force never touches this one),
+`nodesCulled` (queued, then skipped because a closer hit had already shrunk the search — see
+`docs/bvh.md` §3 for what this measures), and `aabbTests`. The comment at `:27-28` is explicit that
+counting is an increment in the inner loop and Phase 9 should price that cost before quoting timings
+from it — this repository has no Phase 9 benchmark yet, so any number from `QueryStats` in a writeup
+must stay labelled `UNVERIFIED` until one exists.
+
+**The oracle, `bruteForceClosestHit`** (`mesh_query.cpp:5-30`). O(n) over every triangle in the mesh,
+with the only pruning available absent a spatial structure: `closest` starts at `ray.tMax` and
+shrinks to the best `t` found so far, narrowing the range every subsequent
+`intersectRayTriangle` call searches (`:11`, `:15-16`). The comment at `:9-10` states the exact
+relationship to the BVH: a BVH generalises this one shrinking scalar so that the same shrink can skip
+*whole subtrees* instead of just tightening one triangle's range test. This is the load-bearing
+sentence connecting the two documents. Deliberately the most obvious correct code in the file — no
+early-outs beyond the `tMax` shrink, no cleverness — because it exists specifically so it cannot
+share a bug with the accelerated path it is meant to validate; test/comment: `mesh_query.hpp:41-43`.
+
+**`bruteForceAnyHit`** (`mesh_query.cpp:32-45`) is a distinct function rather than a flag on the
+first, because once an accelerated structure exists the two queries want different traversal orders:
+closest-hit benefits from visiting near before far so `tMax`/`closest` shrinks early; any-hit can
+return on the very first intersection found, in whatever order the primitives happen to be visited,
+so there is no reason to pay for ordering. Its stats bookkeeping is deliberately partial — on a hit it
+counts only `i + 1` triangles, the ones actually examined before stopping (`:39`), not the full mesh
+(`:43` handles the miss case, where every triangle genuinely was tested).
+
+**Time complexity.** O(n) per query, n = triangle count, with no preprocessing (there is no structure
+to build — that is the entire reason a BVH is worth building on top of this). **Space.** O(1)
+beyond the mesh itself and the `MeshHit`/`QueryStats` outputs.
+
+**Interaction with the rest of the system.** Every BVH query test in `tests/test_bvh.cpp` (§`BVHQuery`
+group, `:398-521`) constructs a scene, runs both `bruteForceClosestHit` and `BVH::closestHit`, and
+asserts they agree — on hit/miss, on `t`, and (where triangles do not share a tie) on
+`triangleIndex`. That agreement is the closest thing this project has to a specification for what
+"correct" means for the accelerated structure: the oracle *is* the spec.
+
+### Mesh construction hardening that arrived alongside Phase 2a
+
+Two changes to `Mesh` (`include/geometry/mesh.hpp`, `src/geometry/mesh.cpp`) that predate the BVH
+existing in the tree but exist because of it, so they are recorded here rather than silently folded
+into the Phase 1 sections above (whose line citations describe the `935c354` snapshot, not this one):
+
+- **NaN vertices are now rejected in the constructor.** `src/geometry/mesh.cpp:16-25`: every position
+  is checked with `isFinite` and the constructor throws `std::invalid_argument` if any fails. The
+  comment gives two independent reasons, both about *silent* corruption rather than a crash: (1)
+  `AABB::extend`'s `fmin`/`fmax` (`include/geometry/aabb.hpp:44-47`, backed by `minComponents` /
+  `maxComponents`) silently drop a NaN operand rather than propagating it, so a mesh with one NaN
+  vertex would compute a bounds box that does not actually contain that vertex — a structural
+  invariant (§8 above, and `docs/bvh.md`'s bounds-tightness invariant) silently violated at
+  construction time, long before a BVH build could catch it; (2) a NaN centroid becomes a NaN split
+  key, and `std::nth_element`'s comparator (`bvh.cpp`'s `objectMedian`, `<` on `centroids[a][axis]`)
+  is then no longer a strict weak ordering, which is undefined behaviour for the standard library
+  algorithm, not just a wrong answer. Rejecting at the `Mesh` boundary — the documented trust boundary
+  for untrusted data (`include/geometry/mesh.hpp:29-31`) — means the BVH build never has to think
+  about this case. Test: `tests/test_obj_loader.cpp:326`, `RejectsNonFiniteCoordinates` (via the OBJ
+  loader, which routes through this same constructor).
+- **A `revision()` counter** (`include/geometry/mesh.hpp:68-74`, bumped in `Mesh::transform`,
+  `src/geometry/mesh.cpp:59`). A BVH records the mesh's revision at build time and asserts it is
+  unchanged on every query (`docs/bvh.md` §8). This exists because `triangleCount()` staying the same
+  cannot detect the case that actually matters here: the *same* mesh object, transformed in place
+  after the tree was built, still has the same triangle count but now describes different geometry
+  than the tree's cached bounds assume. Two different `Mesh` objects of the same size both start at
+  revision 0 and are *not* distinguished by this counter — it is a same-object staleness check, not
+  an identity check.
+
+---
+
 ## Appendix A — two bugs fixed in this milestone
 
 Both were found while writing the tests, both are documented in the `841777e` commit message and in
@@ -1254,21 +1421,25 @@ silently.
 
 ## Appendix C — what Phase 1 deliberately does not contain
 
-- **Ray/triangle intersection** — no Möller–Trumbore, no watertight variant, nothing. Deliberately
-  out of scope. `UNKNOWN — not yet implemented`.
-- **BVH node type, construction, partitioning, traversal** — Phase 2.
-  `UNKNOWN — not yet implemented`.
-- **SAH** — only the cost *term* exists (`AABB::surfaceArea`, `include/geometry/aabb.hpp:93`) and the
-  binning *helper* (`AABB::offset`, `:138`). The heuristic itself, bin sweeping, and cost evaluation
-  are Phase 3. `UNKNOWN — not yet implemented`.
-- **Configurable leaf size, max depth, split strategy** — Phase 3.
-  `UNKNOWN — not yet implemented`.
+- ~~**Ray/triangle intersection**~~ — done in Phase 2a. See the addendum below and
+  `include/geometry/intersect.hpp`.
+- ~~**BVH node type, construction, partitioning, traversal**~~ — done in Phase 2b. See `docs/bvh.md`.
+- **SAH** — only the cost *term* exists (`AABB::surfaceArea`, `include/geometry/aabb.hpp:68`) and the
+  binning *helper* (`AABB::offset`, `:108`). The heuristic itself, bin sweeping, and cost evaluation
+  remain Phase 3. `UNKNOWN — not yet implemented`. (`bvh::SplitStrategy` currently has two members,
+  `ObjectMedian` and `CentroidMedian` — `include/bvh/bvh.hpp:18-22` — with a comment marking where
+  SAH joins.)
+- **Configurable leaf size, max depth, split strategy** — the `BuildConfig` fields exist and are
+  exercised by both current strategies (`include/bvh/bvh.hpp:35-41`); the Phase 3/4 *UI* to drive
+  them interactively is `UNKNOWN — not yet implemented`, though the ranges it will expose are already
+  named (`kUiMinLeafSize` etc., `include/bvh/bvh.hpp:27-30`).
 - **Vulkan instance/device/pipelines/descriptor sets/compute** — Phases 7–8, currently blocked on the
   toolchain. `UNKNOWN — not yet implemented`.
-- **OBJ loading** — no parser in the tree. `UNKNOWN — not yet implemented`.
-- **Benchmarks** — `benchmarks/results/` contains only `README.md`, a format and methodology
+- ~~**OBJ loading**~~ — done in Phase 2a. See `docs/scene.md`.
+- **Benchmarks** — `benchmarks/results/` still contains only `README.md`, a format and methodology
   specification. No measurement of any kind exists, so every performance statement in this document
-  is an argument and is labelled as one.
+  and in `docs/bvh.md` is either an argument (labelled `UNVERIFIED`) or, for the one exception, a
+  number quoted from a source comment and attributed to it (`kBestPruneSlack`, `docs/bvh.md` §9).
 
 ## Appendix D — changelog
 

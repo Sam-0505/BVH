@@ -7,19 +7,9 @@
 
 namespace geom {
 
-// A 3-component vector used for both points and directions.
-//
-// Storage is three named scalars rather than an array, because named access
-// (v.x) dominates in readability. Indexed access is still required -- a BVH
-// splits along a runtime-chosen axis -- so operator[] is provided, implemented
-// with a conditional chain rather than the common `(&x)[i]` trick.
-//
-// `(&x)[i]` is undefined behaviour: pointer arithmetic is only defined within a
-// single object, and three separate members are not an array however they are
-// laid out. The conditional form below is well-defined, and because a ternary of
-// lvalues is itself an lvalue it still yields a real reference. Optimisers turn
-// it into the same one or two instructions for a constant index, and a cmov or
-// small branch for a runtime one.
+// operator[] uses a conditional chain rather than the usual `(&x)[i]`, which is
+// UB -- three members are not an array. Clang compiles it to a cmov, and it
+// costs nothing at all where the index is a constant.
 struct Vec3 {
     Scalar x{};
     Scalar y{};
@@ -43,9 +33,7 @@ struct Vec3 {
     constexpr Vec3& operator*=(Scalar s) { x *= s; y *= s; z *= s; return *this; }
     Vec3& operator/=(Scalar s);
 
-    // Exact bitwise-value comparison. Useful for tests over exactly-representable
-    // values and for detecting "unchanged"; never use it to compare results of
-    // floating-point arithmetic -- use nearlyEqual() for that.
+    // Exact comparison. Use nearlyEqual() for anything arithmetic produced.
     friend constexpr bool operator==(const Vec3& a, const Vec3& b) {
         return a.x == b.x && a.y == b.y && a.z == b.z;
     }
@@ -57,16 +45,10 @@ constexpr Vec3 operator-(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y 
 constexpr Vec3 operator-(const Vec3& v) { return {-v.x, -v.y, -v.z}; }
 constexpr Vec3 operator*(const Vec3& v, Scalar s) { return {v.x * s, v.y * s, v.z * s}; }
 constexpr Vec3 operator*(Scalar s, const Vec3& v) { return v * s; }
-// Division by a zero scalar is undefined behaviour ([expr.mul]/4) even for
-// floating point, where IEEE-754 would give +/-inf. The zero case is branched
-// out and the IEEE answer reproduced by multiplying by the signed infinity:
-// x * (+/-inf) is +/-inf with the correct sign, and 0 * inf is NaN -- exactly
-// what x/0 and 0/0 produce.
-//
-// The non-zero path keeps a true divide rather than multiplying by a
-// reciprocal everywhere. Multiply-by-reciprocal is faster but adds a second
-// rounding step, and it overflows to infinity for a denormal divisor where the
-// true quotient is finite. This is not a hot path, so correctness wins.
+// Divide by zero is UB per [expr.mul]/4 even for float, so the zero case is
+// branched out and IEEE's answer reproduced by multiplying by signed infinity.
+// The normal path keeps a true divide: multiply-by-reciprocal would add a
+// rounding step and overflow for denormal divisors.
 inline Vec3 operator/(const Vec3& v, Scalar s) {
     if (s == Scalar(0)) {
         const Scalar inf = safeReciprocal(s);
@@ -75,15 +57,13 @@ inline Vec3 operator/(const Vec3& v, Scalar s) {
     return {v.x / s, v.y / s, v.z / s};
 }
 
-// Defined out of line because it forwards to the guarded operator/ above, which
-// is not visible from inside the class body.
+// Out of line: it forwards to the guarded operator/ declared below the class.
 inline Vec3& Vec3::operator/=(Scalar s) {
     *this = *this / s;
     return *this;
 }
 
-// Component-wise (Hadamard) product. Distinct from dot/cross; used for scaling
-// along axes and for the ray/slab test's reciprocal-direction multiply.
+// Component-wise product.
 constexpr Vec3 mul(const Vec3& a, const Vec3& b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
 
 constexpr Scalar dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -98,22 +78,17 @@ constexpr Vec3 cross(const Vec3& a, const Vec3& b) {
 constexpr Scalar lengthSquared(const Vec3& v) { return dot(v, v); }
 inline Scalar length(const Vec3& v) { return std::sqrt(lengthSquared(v)); }
 
-// Precondition: v is not the zero vector.
-//
-// A zero-length input is a programming error, caught by the assert in a debug
-// build. In a release build the assert is gone, so the division must still be
-// well-defined -- operator/ above guarantees that, yielding inf/NaN rather than
-// undefined behaviour. Callers that cannot guarantee a non-degenerate input
-// must use normalizeSafe() instead of relying on that fallback.
+// Precondition: v is non-zero. Release builds drop the assert, so operator/
+// still has to be well-defined there -- it is. Use normalizeSafe() when a
+// degenerate input is actually possible.
 inline Vec3 normalize(const Vec3& v) {
     const Scalar len = length(v);
     assert(len > Scalar(0) && "normalize() on a zero-length vector");
     return v / len;
 }
 
-// Degenerate-tolerant normalize: returns `fallback` when v is too short to have a
-// meaningful direction. Needed for mesh data, where degenerate triangles produce
-// zero-length face normals.
+// Returns `fallback` for a vector too short to have a direction -- real mesh
+// data has zero-area triangles with zero-length normals.
 inline Vec3 normalizeSafe(const Vec3& v, const Vec3& fallback = Vec3(Scalar(0))) {
     const Scalar lenSq = lengthSquared(v);
     if (lenSq <= kEpsilon * kEpsilon) return fallback;
@@ -135,9 +110,7 @@ constexpr Scalar maxComponent(const Vec3& v) {
     return v.x > v.y ? (v.x > v.z ? v.x : v.z) : (v.y > v.z ? v.y : v.z);
 }
 
-// Index of the largest component. Ties resolve to the lowest index, which keeps
-// BVH split-axis selection deterministic for symmetric bounds -- important for
-// reproducible benchmarks.
+// Ties go to the lowest index, so split-axis choice stays deterministic.
 constexpr int maxAxis(const Vec3& v) {
     if (v.x >= v.y && v.x >= v.z) return 0;
     return v.y >= v.z ? 1 : 2;

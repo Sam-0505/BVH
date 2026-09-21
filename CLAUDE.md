@@ -116,7 +116,7 @@ Useful options:
 | `BVH_BUILD_TESTS` | ON | Build the GoogleTest suite |
 | `BVH_ENABLE_SANITIZERS` | OFF | `-fsanitize=address,undefined` |
 | `BVH_WARNINGS_AS_ERRORS` | OFF | `-Werror`; the tree is currently clean under it |
-| `BVH_CONSERVATIVE_RAY_BOX` | ON | Widen the ray/AABB exit distance for watertightness. Off measures the exact test against it (Phase 9) |
+| `BVH_CONSERVATIVE_RAY_BOX` | ON | Widen the ray/AABB exit distance, and the BVH's box-vs-triangle prune threshold, for watertightness. Off measures the exact test against it (Phase 9) |
 
 GoogleTest is found via `find_package` and otherwise fetched (pinned to v1.15.2), so the
 first configure needs network access.

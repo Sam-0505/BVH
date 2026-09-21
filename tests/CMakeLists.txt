@@ -31,10 +31,17 @@ add_executable(geometry_tests
     test_triangle.cpp
     test_mesh.cpp
     test_preconditions.cpp
+    test_intersect.cpp
+    test_mesh_query.cpp
+    test_obj_loader.cpp
+    test_procedural.cpp
+    test_bvh.cpp
 )
 
 target_link_libraries(geometry_tests PRIVATE
     bvh::geometry
+    bvh::bvh
+    bvh::scene
     GTest::gtest
     GTest::gtest_main
 )
