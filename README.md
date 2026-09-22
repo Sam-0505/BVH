@@ -3,8 +3,6 @@
 Interactive C++20/Vulkan engine for constructing, visualising, benchmarking and tuning
 Bounding Volume Hierarchies for spatial queries.
 
-Full specification: [`BVH_Explorer_Project_Plan.md`](BVH_Explorer_Project_Plan.md).
-
 ## Status
 
 | Phase | Scope | State |
