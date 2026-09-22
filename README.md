@@ -3,14 +3,6 @@
 Interactive C++20/Vulkan engine for constructing, visualising, benchmarking and tuning
 Bounding Volume Hierarchies for spatial queries.
 
-## Status
-
-| Phase | Scope | State |
-|---|---|---|
-| 1 | Geometry core — Vec3/Vec4/Mat4, Ray, Plane, Triangle, AABB, Mesh | Complete, 105 tests passing |
-| 2 | BVH construction and traversal | Not started |
-| 3+ | Configurable parameters, Vulkan visualisation, GPU compute, benchmarking | Not started |
-
 ## Building
 
 Requires CMake 3.20+ and a C++20 compiler. GoogleTest is fetched automatically on the
