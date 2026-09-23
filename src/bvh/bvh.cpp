@@ -25,6 +25,7 @@ const char* toString(SplitStrategy s) {
     switch (s) {
         case SplitStrategy::ObjectMedian: return "object_median";
         case SplitStrategy::CentroidMedian: return "centroid_median";
+        case SplitStrategy::BinnedSAH: return "binned_sah";
     }
     return "unknown";
 }
@@ -37,11 +38,122 @@ bool BuildConfig::isValid(std::string* error) const {
     // 0 would make every node unsplittable-but-not-a-leaf.
     if (maxLeafSize == 0) return fail("maxLeafSize must be at least 1");
     if (maxDepth > kMaxDepthLimit) return fail("maxDepth exceeds kMaxDepthLimit (64)");
+    if (sahBinCount != 4 && sahBinCount != 8 && sahBinCount != 16 && sahBinCount != 32) {
+        return fail("sahBinCount must be one of 4, 8, 16, or 32");
+    }
     if (error != nullptr) error->clear();
     return true;
 }
 
 namespace {
+
+constexpr std::uint32_t kMaxSahBins = 32;
+
+struct SahSplit {
+    int axis{0};
+    std::uint32_t splitBin{0};
+    Scalar cost{std::numeric_limits<Scalar>::infinity()};
+    bool valid{false};
+};
+
+struct RangeInfo {
+    AABB bounds;
+    AABB centroidBounds;
+};
+
+std::uint32_t binIndex(const BuildConfig& config, const AABB& centroidBounds,
+                       const Vec3& centroid, int axis) {
+    const Scalar extent = centroidBounds.max[axis] - centroidBounds.min[axis];
+    if (!(extent > Scalar(0)) || !std::isfinite(extent)) return 0;
+    const Scalar offset = (centroid[axis] - centroidBounds.min[axis]) / extent;
+    const Scalar scaled = offset * static_cast<Scalar>(config.sahBinCount);
+    if (!std::isfinite(scaled)) return 0;
+    const int bin = static_cast<int>(std::floor(scaled));
+    return static_cast<std::uint32_t>(std::max(0, std::min(bin,
+        static_cast<int>(config.sahBinCount) - 1)));
+}
+
+RangeInfo rangeInfo(std::uint32_t first, std::uint32_t count,
+                    const std::vector<std::uint32_t>& indices,
+                    const std::vector<AABB>& triBounds,
+                    const std::vector<Vec3>& centroids) {
+    RangeInfo info;
+    for (std::uint32_t i = first; i < first + count; ++i) {
+        const std::uint32_t p = indices[i];
+        info.bounds.extend(triBounds[p]);
+        info.centroidBounds.extend(centroids[p]);
+    }
+    return info;
+}
+
+SahSplit binnedSah(const BuildConfig& config, std::uint32_t first, std::uint32_t count,
+                   const std::vector<std::uint32_t>& indices,
+                   const std::vector<AABB>& triBounds, const std::vector<Vec3>& centroids,
+                   const RangeInfo& range) {
+    const Scalar parentArea = range.bounds.surfaceArea();
+    if (!(parentArea > Scalar(0)) || !std::isfinite(parentArea)) return {};
+
+    struct Bin {
+        AABB bounds;
+        std::uint32_t count{0};
+    };
+    std::array<Bin, kMaxSahBins> bins;
+    SahSplit best;
+
+    for (int axis = 0; axis < 3; ++axis) {
+        const Scalar extent = range.centroidBounds.max[axis] - range.centroidBounds.min[axis];
+        if (!(extent > Scalar(0)) || !std::isfinite(extent)) continue;
+        for (std::uint32_t i = 0; i < config.sahBinCount; ++i) bins[i] = Bin{};
+        for (std::uint32_t i = first; i < first + count; ++i) {
+            const std::uint32_t p = indices[i];
+            Bin& bin = bins[binIndex(config, range.centroidBounds, centroids[p], axis)];
+            ++bin.count;
+            bin.bounds.extend(triBounds[p]);
+        }
+
+        std::array<AABB, kMaxSahBins> leftBounds;
+        std::array<AABB, kMaxSahBins> rightBounds;
+        std::array<std::uint32_t, kMaxSahBins> leftCounts{};
+        std::array<std::uint32_t, kMaxSahBins> rightCounts{};
+        AABB runningBounds;
+        std::uint32_t runningCount = 0;
+        for (std::uint32_t i = 0; i < config.sahBinCount; ++i) {
+            runningBounds.extend(bins[i].bounds);
+            runningCount += bins[i].count;
+            leftBounds[i] = runningBounds;
+            leftCounts[i] = runningCount;
+        }
+        runningBounds = AABB{};
+        runningCount = 0;
+        for (std::uint32_t i = config.sahBinCount; i-- > 0;) {
+            runningBounds.extend(bins[i].bounds);
+            runningCount += bins[i].count;
+            rightBounds[i] = runningBounds;
+            rightCounts[i] = runningCount;
+        }
+
+        for (std::uint32_t split = 0; split + 1 < config.sahBinCount; ++split) {
+            const std::uint32_t leftCount = leftCounts[split];
+            const std::uint32_t rightCount = rightCounts[split + 1];
+            if (leftCount == 0 || rightCount == 0) continue;
+            const Scalar leftArea = leftBounds[split].surfaceArea();
+            const Scalar rightArea = rightBounds[split + 1].surfaceArea();
+            const Scalar cost = Scalar(1) +
+                (leftArea / parentArea) * static_cast<Scalar>(leftCount) +
+                (rightArea / parentArea) * static_cast<Scalar>(rightCount);
+            // Strictly better only: axis/bin scan order makes equal costs first-wins.
+            if (!std::isfinite(leftArea) || !std::isfinite(rightArea) ||
+                !std::isfinite(cost) || cost >= best.cost) {
+                continue;
+            }
+            best.axis = axis;
+            best.splitBin = split;
+            best.cost = cost;
+            best.valid = true;
+        }
+    }
+    return best;
+}
 
 // Build scratch. Lives only for the duration of build(): the per-triangle
 // bounds and centroids cost 36 bytes per triangle but save refetching three
@@ -96,32 +208,45 @@ struct Builder {
     // The node slot is allocated by the caller so that siblings stay adjacent.
     void buildNode(std::uint32_t nodeIdx, std::uint32_t first, std::uint32_t count,
                    std::uint32_t depth) {
-        AABB bounds;
-        AABB centroidBounds;
-        for (std::uint32_t i = first; i < first + count; ++i) {
-            const std::uint32_t p = indices[i];
-            bounds.extend(triBounds[p]);
-            centroidBounds.extend(centroids[p]);
-        }
-        nodes[nodeIdx].bounds = bounds;
+        const RangeInfo range = rangeInfo(first, count, indices, triBounds, centroids);
+        nodes[nodeIdx].bounds = range.bounds;
 
         if (count <= cfg.maxLeafSize || count < 2 || depth >= cfg.maxDepth) {
             makeLeaf(nodeIdx, first, count, depth);
             return;
         }
 
-        // Centroid bounds, not geometric bounds: a few large primitives can make
-        // the longest geometric axis one along which the centroids barely spread.
-        const int axis = centroidBounds.longestAxis();
-
         std::uint32_t mid = first + count;
-        if (cfg.strategy == SplitStrategy::CentroidMedian) {
-            mid = centroidMedian(first, count, axis, centroidBounds.centroid()[axis]);
+        if (cfg.strategy == SplitStrategy::BinnedSAH) {
+            const SahSplit split = binnedSah(cfg, first, count, indices, triBounds, centroids, range);
+            if (split.valid && split.cost >= static_cast<Scalar>(count)) {
+                makeLeaf(nodeIdx, first, count, depth);
+                return;
+            }
+            if (split.valid) {
+                const auto begin = indices.begin();
+                const auto it = std::partition(begin + first, begin + first + count,
+                                               [this, &range, split](std::uint32_t p) {
+                    return binIndex(cfg, range.centroidBounds, centroids[p], split.axis) <=
+                           split.splitBin;
+                });
+                mid = static_cast<std::uint32_t>(it - begin);
+            }
+        } else {
+            // Centroid bounds, not geometric bounds: a few large primitives can make
+            // the longest geometric axis one along which the centroids barely spread.
+            const int axis = range.centroidBounds.longestAxis();
+            if (cfg.strategy == SplitStrategy::CentroidMedian) {
+                mid = centroidMedian(first, count, axis, range.centroidBounds.centroid()[axis]);
+            }
+            if (mid == first || mid == first + count) {
+                mid = objectMedian(first, count, axis);
+            }
         }
-        // Also the fallback when every centroid lands on one side of the plane,
-        // which includes the all-coincident case. Object median cannot produce
-        // an empty child, so the recursion always terminates.
+        // An invalid SAH candidate or an empty bin partition falls
+        // back to object median, which always makes two nonempty children.
         if (mid == first || mid == first + count) {
+            const int axis = range.centroidBounds.longestAxis();
             mid = objectMedian(first, count, axis);
         }
 
@@ -411,6 +536,18 @@ bool BVH::validate(const geom::Mesh& mesh, std::string* error) const {
     if (nodes_.empty()) return fail("non-empty mesh produced no nodes");
     if (stats_.nodeCount != nodes_.size()) return fail("stats.nodeCount disagrees with nodes()");
 
+    // Keep validation's early-leaf decision bit-for-bit aligned with build().
+    std::vector<AABB> triBounds;
+    std::vector<Vec3> centroids;
+    if (config_.strategy == SplitStrategy::BinnedSAH) {
+        triBounds.resize(n);
+        centroids.resize(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            triBounds[i] = mesh.triangle(i).bounds();
+            centroids[i] = triBounds[i].centroid();
+        }
+    }
+
     std::vector<char> primSeen(n, 0);
     std::vector<char> slotSeen(n, 0);
 
@@ -438,11 +575,17 @@ bool BVH::validate(const geom::Mesh& mesh, std::string* error) const {
             if (node.leftOrFirst > n || node.count > n - node.leftOrFirst) {
                 return fail("leaf range runs past the index array");
             }
-            // A leaf may exceed maxLeafSize only because the depth cap cut the
-            // recursion first; the count < 2 guard cannot produce one, since
-            // maxLeafSize >= 1.
             if (node.count > config_.maxLeafSize && depth != config_.maxDepth) {
-                return fail("leaf exceeds maxLeafSize above the depth cap");
+                if (config_.strategy != SplitStrategy::BinnedSAH) {
+                    return fail("leaf exceeds maxLeafSize above the depth cap");
+                }
+                const RangeInfo range = rangeInfo(node.leftOrFirst, node.count,
+                                                  primitiveIndices_, triBounds, centroids);
+                const SahSplit split = binnedSah(config_, node.leftOrFirst, node.count,
+                                                  primitiveIndices_, triBounds, centroids, range);
+                if (!split.valid || split.cost < static_cast<Scalar>(node.count)) {
+                    return fail("oversized SAH leaf has a beneficial split");
+                }
             }
 
             const std::uint32_t end = node.leftOrFirst + node.count;

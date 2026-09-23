@@ -9,6 +9,10 @@ _deps/
 # Compiled shaders
 *.spv
 
+# Markdown documentation, except README files.
+*.md
+!README.md
+
 # IDE / editor
 .vscode/
 .idea/
@@ -20,5 +24,6 @@ compile_commands.json
 
 # Local agent state (keep .claude/agents and CLAUDE.md tracked)
 .claude/
+.codex/
 BVH_Explorer_Project_Plan.md
 docs/

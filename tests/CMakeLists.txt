@@ -36,11 +36,13 @@ add_executable(geometry_tests
     test_obj_loader.cpp
     test_procedural.cpp
     test_bvh.cpp
+    test_bvh_visualization.cpp
 )
 
 target_link_libraries(geometry_tests PRIVATE
     bvh::geometry
     bvh::bvh
+    bvh::rendering
     bvh::scene
     GTest::gtest
     GTest::gtest_main

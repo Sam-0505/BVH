@@ -14,10 +14,10 @@
 
 namespace bvh {
 
-// SAH joins this in Phase 3.
 enum class SplitStrategy {
     ObjectMedian,    // equal primitive counts either side
     CentroidMedian,  // split plane at the midpoint of the centroid bounds
+    BinnedSAH,       // 1 + (A_l / A_p) N_l + (A_r / A_p) N_r; leaf cost is N
 };
 
 const char* toString(SplitStrategy s);
@@ -36,6 +36,7 @@ struct BuildConfig {
     std::uint32_t maxLeafSize{4};
     std::uint32_t maxDepth{32};
     SplitStrategy strategy{SplitStrategy::CentroidMedian};
+    std::uint32_t sahBinCount{16};
 
     bool isValid(std::string* error = nullptr) const;
 };
@@ -114,9 +115,9 @@ public:
     // union of what they cover (containment alone would accept a tree of
     // all-root boxes, which answers correctly and traverses like brute force),
     // leaf ranges partition the index array, every triangle is referenced
-    // once, depth is within the limit, a leaf exceeds maxLeafSize only at the
-    // depth cap, and the recorded stats agree with the tree. O(n), for tests
-    // and debugging.
+    // once, depth is within the limit, and the recorded stats agree with the
+    // tree. An oversized Binned SAH leaf must be no more expensive than its
+    // best binned split. O(n), for tests and debugging.
     bool validate(const geom::Mesh& mesh, std::string* error = nullptr) const;
 
 private:

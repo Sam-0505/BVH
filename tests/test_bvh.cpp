@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -21,7 +22,8 @@ using bvh::SplitStrategy;
 namespace {
 
 constexpr SplitStrategy kStrategies[] = {SplitStrategy::ObjectMedian,
-                                         SplitStrategy::CentroidMedian};
+                                         SplitStrategy::CentroidMedian,
+                                         SplitStrategy::BinnedSAH};
 
 // mt19937 with a hand-rolled [0,1) mapping: std::uniform_real_distribution is
 // not reproducible across standard libraries, and a comparison against brute
@@ -218,6 +220,33 @@ Mesh geometricallyClusteredTriangles(std::size_t count) {
     return Mesh(std::move(p), std::move(idx));
 }
 
+// Triangles whose bounds are [lo, hi] on x and [0, 1] on y/z. Their bound
+// centroids are exactly the x interval midpoints, which makes SAH bins explicit.
+Mesh xSlabTriangles(const std::vector<std::pair<Scalar, Scalar>>& xRanges) {
+    std::vector<Vec3> p;
+    std::vector<std::uint32_t> idx;
+    p.reserve(xRanges.size() * 3);
+    idx.reserve(xRanges.size() * 3);
+    for (const auto& range : xRanges) {
+        const auto base = static_cast<std::uint32_t>(p.size());
+        p.push_back(Vec3(range.first, 0.0f, 0.0f));
+        p.push_back(Vec3(range.second, 1.0f, 0.0f));
+        p.push_back(Vec3(range.first, 0.0f, 1.0f));
+        idx.insert(idx.end(), {base, base + 1, base + 2});
+    }
+    return Mesh(std::move(p), std::move(idx));
+}
+
+void expectSameLayout(const BVH& a, const BVH& b) {
+    ASSERT_EQ(a.primitiveIndices(), b.primitiveIndices());
+    ASSERT_EQ(a.nodes().size(), b.nodes().size());
+    for (std::size_t i = 0; i < a.nodes().size(); ++i) {
+        EXPECT_EQ(a.nodes()[i].bounds, b.nodes()[i].bounds) << i;
+        EXPECT_EQ(a.nodes()[i].leftOrFirst, b.nodes()[i].leftOrFirst) << i;
+        EXPECT_EQ(a.nodes()[i].count, b.nodes()[i].count) << i;
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -250,6 +279,30 @@ TEST(BVHConfig, RejectsDepthBeyondTheTraversalStack) {
     BVH tree;
     const Mesh m = scene::uvSphere(200);
     EXPECT_THROW(tree.build(m, cfg), std::invalid_argument);
+}
+
+TEST(BVHConfig, RejectsUnsupportedSahBinCounts) {
+    for (std::uint32_t bins : {0u, 1u, 3u, 5u, 12u, 64u}) {
+        BuildConfig cfg;
+        cfg.sahBinCount = bins;
+        std::string error;
+        EXPECT_FALSE(cfg.isValid(&error)) << bins;
+        EXPECT_NE(error.find("sahBinCount"), std::string::npos) << error;
+
+        BVH tree;
+        EXPECT_THROW(tree.build(scene::uvSphere(20), cfg), std::invalid_argument);
+    }
+}
+
+TEST(BVHConfig, AcceptsSupportedSahBinCountsForEveryStrategy) {
+    for (SplitStrategy strategy : kStrategies) {
+        for (std::uint32_t bins : {4u, 8u, 16u, 32u}) {
+            BuildConfig cfg;
+            cfg.strategy = strategy;
+            cfg.sahBinCount = bins;
+            EXPECT_TRUE(cfg.isValid()) << bvh::toString(strategy) << "/" << bins;
+        }
+    }
 }
 
 TEST(BVHConfig, AcceptsTheWholeUiRange) {
@@ -464,6 +517,21 @@ TEST(BVHQuery, EveryLeafSizeAndStrategyGivesTheSameAnswers) {
     }
 }
 
+TEST(BVHQuery, EverySahBinCountBuildsAndMatchesBruteForce) {
+    const Mesh m = scene::triangleSoup(1000, 55);
+    const std::vector<Ray> rays = RayGen(23).aroundBounds(m.bounds(), 300);
+    for (std::uint32_t bins : {4u, 8u, 16u, 32u}) {
+        BuildConfig cfg;
+        cfg.strategy = SplitStrategy::BinnedSAH;
+        cfg.sahBinCount = bins;
+        BVH tree;
+        tree.build(m, cfg);
+        const std::string label = "binned_sah/" + std::to_string(bins);
+        expectValid(tree, m, label);
+        checkAgainstBruteForce(m, tree, rays, label);
+    }
+}
+
 TEST(BVHQuery, EveryDepthLimitGivesTheSameAnswers) {
     const Mesh m = scene::uvSphere(3000);
     const std::vector<Ray> rays = RayGen(22).aroundBounds(m.bounds(), 300);
@@ -552,6 +620,79 @@ TEST(BVHDegenerate, CoincidentTrianglesTerminateAndValidate) {
         const Ray r(Vec3(0.2f, 0.2f, -1.0f), Vec3(0.0f, 0.0f, 1.0f));
         ASSERT_TRUE(tree.closestHit(m, r, hit)) << label;
         EXPECT_NEAR(hit.t, 1.0f, 1e-5f) << label;
+    }
+}
+
+TEST(BVHSah, StopsAtAnOversizedLeafWhenNoSplitBeatsLeafCost) {
+    const Mesh m({{0.0f, 0.0f, 0.0f}, {10.0f, 0.0f, 0.0f}, {0.0f, 10.0f, 0.0f},
+                  {0.1f, 0.0f, 0.0f}, {10.1f, 0.0f, 0.0f}, {10.1f, 10.0f, 0.0f}},
+                 {0, 1, 2, 3, 4, 5});
+    BuildConfig cfg;
+    cfg.strategy = SplitStrategy::BinnedSAH;
+    cfg.maxLeafSize = 1;
+    cfg.sahBinCount = 4;
+    BVH tree;
+    tree.build(m, cfg);
+
+    ASSERT_EQ(tree.nodes().size(), 1u);
+    EXPECT_TRUE(tree.nodes()[0].isLeaf());
+    EXPECT_EQ(tree.nodes()[0].count, 2u);
+    expectValid(tree, m, "binned_sah early leaf");
+
+    const std::vector<Ray> rays = {Ray(Vec3(2.0f, 2.0f, -1.0f), Vec3(0.0f, 0.0f, 1.0f))};
+    checkAgainstBruteForce(m, tree, rays, "binned_sah early leaf");
+}
+
+TEST(BVHSah, ChoosesTheBinnedClusterSplitRatherThanObjectMedian) {
+    // The first three centroids land in bin 0 and the outlier in bin 3. SAH
+    // prefers 3/1; object median on x would make a 2/2 root split.
+    const Mesh m = xSlabTriangles({{0.0f, 1.0f}, {1.0f, 2.0f},
+                                   {2.0f, 3.0f}, {100.0f, 101.0f}});
+    BuildConfig cfg;
+    cfg.strategy = SplitStrategy::BinnedSAH;
+    cfg.maxLeafSize = 1;
+    cfg.sahBinCount = 4;
+    BVH tree;
+    tree.build(m, cfg);
+
+    ASSERT_FALSE(tree.nodes()[0].isLeaf());
+    const auto& right = tree.nodes()[tree.nodes()[0].rightChild()];
+    EXPECT_EQ(right.bounds.min.x, 100.0f);
+    expectValid(tree, m, "binned_sah cluster split");
+}
+
+TEST(BVHSah, BinEdgeCentroidStaysWithTheScoredBin) {
+    // The second centroid is exactly the bin-1 boundary in a [0, 4] range.
+    // The cheapest root split is after bin 1, so it remains in the left child.
+    const Mesh m = xSlabTriangles({{-0.01f, 0.01f}, {0.99f, 1.01f},
+                                   {1.00f, 1.02f}, {1.01f, 1.03f},
+                                   {3.99f, 4.01f}});
+    BuildConfig cfg;
+    cfg.strategy = SplitStrategy::BinnedSAH;
+    cfg.maxLeafSize = 1;
+    cfg.sahBinCount = 4;
+    BVH tree;
+    tree.build(m, cfg);
+
+    ASSERT_FALSE(tree.nodes()[0].isLeaf());
+    const auto& left = tree.nodes()[tree.nodes()[0].leftChild()];
+    const auto& right = tree.nodes()[tree.nodes()[0].rightChild()];
+    EXPECT_EQ(left.bounds.max.x, 1.03f);
+    EXPECT_EQ(right.bounds.min.x, 3.99f);
+    expectValid(tree, m, "binned_sah bin edge");
+}
+
+TEST(BVHSah, RepeatBuildsHaveIdenticalLayoutForEveryBinCount) {
+    const Mesh m = scene::triangleSoup(500, 71);
+    for (std::uint32_t bins : {4u, 8u, 16u, 32u}) {
+        BuildConfig cfg;
+        cfg.strategy = SplitStrategy::BinnedSAH;
+        cfg.sahBinCount = bins;
+        BVH first;
+        BVH second;
+        first.build(m, cfg);
+        second.build(m, cfg);
+        expectSameLayout(first, second);
     }
 }
 
@@ -783,6 +924,7 @@ namespace bvh {
 struct BVHTestAccess {
     static std::vector<BVHNode>& nodes(BVH& t) { return t.nodes_; }
     static std::vector<std::uint32_t>& indices(BVH& t) { return t.primitiveIndices_; }
+    static BuildConfig& config(BVH& t) { return t.config_; }
 };
 }  // namespace bvh
 
@@ -811,6 +953,24 @@ std::size_t firstLeaf(const bvh::BVH& t) {
 }
 
 }  // namespace
+
+TEST(BVHValidate, RejectsAnOversizedSahLeafWhenTheDepthCapIsRemoved) {
+    const Mesh m = xSlabTriangles({{0.0f, 1.0f}, {1.0f, 2.0f},
+                                   {2.0f, 3.0f}, {100.0f, 101.0f}});
+    BuildConfig cfg;
+    cfg.strategy = SplitStrategy::BinnedSAH;
+    cfg.maxLeafSize = 1;
+    cfg.maxDepth = 0;
+    cfg.sahBinCount = 4;
+    BVH tree;
+    tree.build(m, cfg);
+    expectValid(tree, m, "depth-capped SAH leaf");
+
+    bvh::BVHTestAccess::config(tree).maxDepth = 32;
+    std::string error;
+    EXPECT_FALSE(tree.validate(m, &error));
+    EXPECT_NE(error.find("beneficial split"), std::string::npos) << error;
+}
 
 TEST(BVHValidate, AcceptsAHealthyTree) {
     const Mesh m = scene::uvSphere(500);

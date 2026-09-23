@@ -151,6 +151,27 @@ target_link_libraries(bvh_bvh
 add_library(bvh::bvh ALIAS bvh_bvh)
 
 # ---------------------------------------------------------------------------
+# Rendering data
+#
+# CPU-side visualization data for the future Vulkan renderer. It deliberately
+# depends on the BVH core but has no Vulkan, GLFW, or ImGui dependency.
+# ---------------------------------------------------------------------------
+
+add_library(bvh_rendering STATIC
+    src/rendering/bvh_visualization.cpp
+)
+
+target_include_directories(bvh_rendering PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+target_link_libraries(bvh_rendering
+    PUBLIC bvh::bvh
+    PRIVATE $<BUILD_INTERFACE:bvh_project_options>)
+
+add_library(bvh::rendering ALIAS bvh_rendering)
+
+# ---------------------------------------------------------------------------
 # Scene I/O
 #
 # Separate from the geometry core: it touches the filesystem and untrusted
